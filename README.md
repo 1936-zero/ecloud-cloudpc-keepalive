@@ -30,19 +30,16 @@ pip install -r requirements.txt
 
 ## 配置说明（cloud_pc.json）
 
-`cloud_pc.json` 由 `login` 命令自动生成，也可手动创建。字段分两类：
+`cloud_pc.json` 由 `login` 命令自动生成，也可手动创建。
 
-### 🔴 必填（缺一不可）
+### 🔴 用户必填（只有这两个）
 
-| 字段 | 说明 | 获取方式 |
-|------|------|---------|
-| `username` | 移动云账号 | 你提供 |
-| `password` | 账号密码 | 你提供 |
-| `access_token` | 登录凭证，每个请求都带 | `login` 自动获取，token 失效后自动用账号密码重登 |
-| `device_uid` | 设备指纹（**必须跨运行稳定**） | 首次运行自动生成（Windows 注册表 / Linux machine-id）。⚠️ 改了会触发"未授信设备"，需重新短信验证 |
-| `instance_id` | 目标云电脑实例（保活对象） | `desktop-keepalive` 自动拉取，无需手填 |
+| 字段 | 说明 |
+|------|------|
+| `username` | 移动云账号 |
+| `password` | 账号密码 |
 
-**最小配置示例**（首次使用，让 `login` 命令自动补全其余字段）：
+**最小配置（首次使用）：**
 ```json
 {
   "username": "你的账号",
@@ -50,21 +47,16 @@ pip install -r requirements.txt
 }
 ```
 
-### 🟢 可选（全部有默认值，服务端不校验）
+### 🟢 自动获取（程序自己填，用户无需关心）
 
-以下字段会作为"设备统计信息"上报，但**实测服务端不做任何校验**（空值也能成功保活）。
-不填则用默认值，对保活功能无影响：
+| 字段 | 怎么来的 | 说明 |
+|------|---------|------|
+| `access_token` | `login` 登录后自动写入 | 登录凭证。失效后程序自动用账号密码重登刷新 |
+| `device_uid` | 首次运行自动生成（Windows 注册表 / Linux machine-id） | 设备指纹。⚠️ 生成后**必须保持不变**，否则触发"未授信设备"需重新短信验证 |
+| `instance_id` | `desktop-keepalive` 自动拉桌面列表获取 | 目标云电脑实例。多桌面时默认选第一个，或用 `--instance-id` 指定 |
 
-| 字段 | 默认值 |
-|------|--------|
-| `device_name` | 主机名 |
-| `client_type` | 按系统自动判断（`linux_x86-64` / `pc_windows_64_yt` / `pc_mac`） |
-| `operating_system` | `platform.system()` |
-| `cores` / `ram` | 4 / 8 |
-| `processor` / `device_company` / `device_model` 等 | "Unknown" / "Server" |
-| `ip_address` / `mac_address` | 127.0.0.1 / 00:00:... |
-
-> **为什么这些字段可选？** 通过逐字段删除实测验证：连空 commonParams（只有 `instanceId + accessToken`）都能成功调用 `desktopUptime`。这些字段纯粹是客户端上报的统计信息，服务端只凭 `accessToken` 鉴权。
+> **实测验证**：除上述字段外，其余设备信息（CPU/内存/磁盘/网卡等 18 个字段）服务端**完全不校验**——
+> 连空 commonParams 都能成功保活。这些字段纯统计用途，无需配置。
 
 ### 迁移到其他服务器
 
