@@ -28,38 +28,72 @@
 pip install -r requirements.txt
 ```
 
+## 配置说明（cloud_pc.json）
+
+`cloud_pc.json` 由 `login` 命令自动生成，也可手动创建。字段分两类：
+
+### 🔴 必填（缺一不可）
+
+| 字段 | 说明 | 获取方式 |
+|------|------|---------|
+| `username` | 移动云账号 | 你提供 |
+| `password` | 账号密码 | 你提供 |
+| `access_token` | 登录凭证，每个请求都带 | `login` 自动获取，token 失效后自动用账号密码重登 |
+| `device_uid` | 设备指纹（**必须跨运行稳定**） | 首次运行自动生成（Windows 注册表 / Linux machine-id）。⚠️ 改了会触发"未授信设备"，需重新短信验证 |
+| `instance_id` | 目标云电脑实例（保活对象） | `desktop-keepalive` 自动拉取，无需手填 |
+
+**最小配置示例**（首次使用，让 `login` 命令自动补全其余字段）：
+```json
+{
+  "username": "你的账号",
+  "password": "你的密码"
+}
+```
+
+### 🟢 可选（全部有默认值，服务端不校验）
+
+以下字段会作为"设备统计信息"上报，但**实测服务端不做任何校验**（空值也能成功保活）。
+不填则用默认值，对保活功能无影响：
+
+| 字段 | 默认值 |
+|------|--------|
+| `device_name` | 主机名 |
+| `client_type` | 按系统自动判断（`linux_x86-64` / `pc_windows_64_yt` / `pc_mac`） |
+| `operating_system` | `platform.system()` |
+| `cores` / `ram` | 4 / 8 |
+| `processor` / `device_company` / `device_model` 等 | "Unknown" / "Server" |
+| `ip_address` / `mac_address` | 127.0.0.1 / 00:00:... |
+
+> **为什么这些字段可选？** 通过逐字段删除实测验证：连空 commonParams（只有 `instanceId + accessToken`）都能成功调用 `desktopUptime`。这些字段纯粹是客户端上报的统计信息，服务端只凭 `accessToken` 鉴权。
+
+### 迁移到其他服务器
+
+只需拷贝 `cloud_pc.json`，**保持 `device_uid` 不变**即可：
+
+```bash
+scp -r cloudpc-keepalive/ user@server:~/
+ssh user@server
+cd cloudpc-keepalive && pip install -r requirements.txt
+python main.py desktop-keepalive   # 直接能用
+```
+
 ## 使用
 
 ### 方式1：完整流程（登录 + 桌面保活）
 
 ```bash
-# 1. 登录
+# 1. 登录（首次，交互式输入账号密码）
 python main.py login
 # account: <账号>
 # password: <密码>
+# → 自动保存 cloud_pc.json
 
-# 2. 桌面保活（需要 instance_id，见方式2获取）
-python main.py desktop-keepalive --instance-id CCA-xxxxxxxxxxxxxxxx
+# 2. 桌面保活（全自动：自动拉桌面列表 + 选桌面 + 保活）
+python main.py desktop-keepalive
 ```
 
-### 方式2：从抓包提取凭证（推荐首次使用）
-
-由于 `instance_id`/`machine_id`/`ticket` 的确切获取接口尚未完全逆向，首次使用建议从抓包提取：
-
-1. 用 Reqable 抓一次「连接桌面」的流量
-2. 把 HAR 放到 `抓包/` 目录
-3. 运行解密脚本（用本工具的 RSA 私钥自动解密所有密文）：
-   ```bash
-   python 抓包/decrypt_har.py "抓包/xxx.har"
-   ```
-4. 从生成的 `_DECRYPTED.md` 报告里提取：
-   - `instanceId`（CCA-开头）— desktopUptime 必需
-   - `accessToken`（token:开头）
-   - `machineId`（UUID）— 可选
-5. 启动保活：
-   ```bash
-   python main.py desktop-keepalive --instance-id CCA-xxx
-   ```
+> `desktop-keepalive` 不带任何参数即为全自动模式：自动调 `/user/getDeviceInfo`
+> 拉取桌面列表，自动选择目标桌面，周期性保活。无需手动获取 `instance_id`。
 
 ### 命令一览
 
@@ -217,37 +251,20 @@ cloudpc-keepalive/
 └── cloud_pc.json      运行时生成（账号/token/设备指纹）
 ```
 
-## 局限与下一步
+## 局限
 
-### 本工具不能做的
+1. **桌面需处于开机状态**：本工具维持桌面"在线态"（防闲置关机），但不能远程**开机**。
+   桌面已关机时，需先在官方客户端或网页端开机。
+2. **4A MFA 登录**：`userId` 字段触发的 4A 认证流程较复杂，本工具未实现（其他登录方式都已支持）。
+3. **多桌面**：当前自动选择第一个桌面保活。多桌面场景可用 `--instance-id` 指定。
+4. **token 有效期**：accessToken 有效期由服务端控制（实测数小时）。失效后自动用账号密码重登，
+   已授信设备无需短信。
 
-1. **维持桌面 SPICE 会话**：真正的桌面会话由 `uSmartView_VDI_Client.exe` 维持，
-   其 SCG 网关认证 + 穿云 Trunk 多路复用 + SPICE 握手协议封装在二进制内，
-   Python 层无法复刻。如果你的云电脑关机策略是"SPICE 会话闲置 N 分钟则关机"，
-   本工具无效。
+## 依赖
 
-2. **4A MFA 登录**：`userId` 字段触发的 4A 认证流程较复杂，本工具未实现。
-
-### 阶段2（桌面会话保活）需要的前置工作
-
-要实现真正的桌面会话保活，需要先抓包确认 V3.8.2 的连接链路：
-
-1. 在装了客户端的 Windows 上用 Wireshark 抓 `uSmartView_VDI_Client.exe` 的出站流量
-2. 确认它是否直连 SCG 网关（端口？TLS？），还是走本地代理
-3. 确认 SPICE 握手包格式（参考博客 codming.com 的 macOS 版分析，但 V3.8.2 可能不同）
-
-抓包结论出来后，可在 `keepalive.py` 基础上扩展 `desktop_session.py` 实现 SCG 认证 +
-SPICE 心跳。
-
-### 参考但不可直接照搬的资料
-
-- **codming.com 博客**：完整逆向了 macOS 家庭云版的 SCG+穿云+SPICE 协议。但 Windows
-  V3.8.2 政企版的这些协议全在 uSmartView 二进制内，Electron 源码里零痕迹（已 grep 验证），
-  博客的具体参数（SCG 端口、AES 密钥、Trunk 帧格式）必须自己抓包确认。
-- **nodeseek Swilder-M/cloudpc-dist**：作者写的 Go 保活工具，但**仓库和 release 二进制
-  都已删除（404）**，源码从未公开，无法获取。
-- **Rgoogle/jiatingyun_pc_automation**（GitHub, 72★）：Python 方案，走 Docker 跑真客户端 +
-  Xvfb + 模拟点击的"重方案"，可作为阶段2 的备选（方案B）。
+- **运行时依赖**：仅 `requests` + `pycryptodome`（见 requirements.txt）
+- **不依赖**：移动云客户端、uSmartView、Windows、Electron、任何 GUI 或第三方 SDK
+- **跨平台**：Linux / macOS / Windows 均可，纯 Python 3.10+
 
 ## 安全提示
 

@@ -49,35 +49,13 @@ def save_config(cfg: dict) -> None:
 
 
 def build_client(cfg: dict) -> EcloudHttpUtil:
-    """Build a client injected with device fingerprint and token from config."""
-    dev_info = cfg.get("device_info")
-    if dev_info:
-        from dataclasses import fields
-        dev = device.DeviceInfo(**{
-            f.name: dev_info[f.name] for f in fields(device.DeviceInfo)
-        })
-    else:
-        dev = device.detect(device_uid=cfg.get("device_uid"))
-        cfg["device_info"] = {
-            "device_uid": dev.device_uid,
-            "device_name": dev.device_name,
-            "client_type": dev.client_type,
-            "client_version": dev.client_version,
-            "device_company": dev.device_company,
-            "device_model": dev.device_model,
-            "operating_system": dev.operating_system,
-            "device_system": dev.device_system,
-            "operating_version": dev.operating_version,
-            "cores": dev.cores,
-            "processor": dev.processor,
-            "system_architecture": dev.system_architecture,
-            "disk_total": dev.disk_total,
-            "disk_used": dev.disk_used,
-            "ram": dev.ram,
-            "ip_address": dev.ip_address,
-            "mac_address": dev.mac_address,
-        }
-        cfg["device_uid"] = dev.device_uid
+    """Build a client injected with device fingerprint and token from config.
+
+    Only device_uid matters (server identifies device by it). All other
+    commonParams fields are unverified by the server — see device.py docstring.
+    """
+    dev = device.detect(device_uid=cfg.get("device_uid"))
+    cfg["device_uid"] = dev.device_uid  # ensure persisted (stable across runs)
 
     client = EcloudHttpUtil(dev.to_common_params())
     if cfg.get("access_token"):
