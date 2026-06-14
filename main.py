@@ -184,16 +184,30 @@ def cmd_keepalive(args):
 
 
 def cmd_status(args):
+    """检查 token 是否有效 + 显示桌面列表与保活状态。"""
     cfg = load_config()
     if not cfg.get("access_token"):
         log.info("not logged in (no token)")
         sys.exit(1)
     client = build_client(cfg)
+    import desktop_list
     try:
-        info = login.get_user_info(client)
-        log.info("OK: token valid. user info: %s", info)
+        desktops = desktop_list.get_desktop_list(client)
+        log.info("OK: token valid. %d desktop(s):", len(desktops))
+        for d in desktops:
+            print(f"  {d.machine_name}  instance={d.instance_id}  vendor={d.origin_company_code}")
+        # 如果有缓存的 instance_id，顺便查一下运行时长
+        inst = cfg.get("instance_id")
+        if inst:
+            import desktop_session
+            sess = desktop_session.DesktopSession(client, inst)
+            try:
+                uptime = sess.report_uptime()
+                log.info("desktop uptime (%s): %s", inst[:16], uptime)
+            except EcloudError as e:
+                log.warning("uptime query failed: %s", e)
     except EcloudError as e:
-        log.error("FAIL: token invalid: %s", e)
+        log.error("FAIL: token invalid or api error: %s", e)
         sys.exit(1)
 
 
