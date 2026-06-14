@@ -286,6 +286,12 @@ def cmd_desktop_keepalive(args):
     )
 
 
+def cmd_web(args):
+    """启动 Web UI（Flask）。"""
+    from web import server
+    server.run(host=args.host, port=args.port)
+
+
 def _token_maybe_expired(err: EcloudError) -> bool:
     msg = (err.message or "").lower()
     return any(h in msg for h in ["token", "失效", "未登录", "expire", "401", "授权"])
@@ -353,6 +359,11 @@ def main():
     sub.add_parser("status", help="check token validity")
     sub.add_parser("logout", help="logout and clear config")
 
+    # Web UI
+    wp = sub.add_parser("web", help="start Web UI (Flask)")
+    wp.add_argument("--host", default="0.0.0.0", help="bind host (default 0.0.0.0)")
+    wp.add_argument("--port", type=int, default=8080, help="port (default 8080)")
+
     args = p.parse_args()
     level = logging.DEBUG if args.verbose >= 2 else logging.INFO
     logging.basicConfig(
@@ -365,7 +376,8 @@ def main():
         {"login": cmd_login, "keepalive": cmd_keepalive,
          "desktop-keepalive": cmd_desktop_keepalive,
          "list-desktops": cmd_list_desktops,
-         "status": cmd_status, "logout": cmd_logout}[args.cmd](args)
+         "status": cmd_status, "logout": cmd_logout,
+         "web": cmd_web}[args.cmd](args)
     except KeyboardInterrupt:
         log.info("interrupted")
     except EcloudError as e:

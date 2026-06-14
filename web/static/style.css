@@ -1,0 +1,171 @@
+/* 移动云电脑保活 - Web UI 样式 */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #f0f2f5;
+  color: #333;
+  line-height: 1.6;
+}
+
+#app {
+  max-width: 680px;
+  margin: 20px auto;
+  padding: 0 16px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+header h1 { font-size: 1.5em; }
+
+.card {
+  background: #fff;
+  border-radius: 10px;
+  padding: 24px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.card h2 { font-size: 1.1em; margin-bottom: 16px; color: #555; }
+
+/* badges */
+.badge {
+  padding: 3px 12px;
+  border-radius: 20px;
+  font-size: 0.8em;
+  font-weight: 600;
+}
+.badge-on { background: #e8f5e9; color: #2e7d32; }
+.badge-off { background: #fafafa; color: #999; border: 1px solid #ddd; }
+
+/* form */
+.form-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.form-row label {
+  width: 90px;
+  font-size: 0.9em;
+  color: #666;
+  flex-shrink: 0;
+}
+.form-row input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.95em;
+}
+.form-row input:focus {
+  outline: none;
+  border-color: #4a90d9;
+}
+.sms-row input { flex: 1; }
+.sms-row .btn-small { margin-left: 8px; }
+
+/* buttons */
+.btn {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.95em;
+  transition: opacity 0.2s;
+}
+.btn:hover { opacity: 0.85; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: #4a90d9; color: #fff; }
+.btn-success { background: #27ae60; color: #fff; }
+.btn-danger { background: #e74c3c; color: #fff; }
+.btn-small {
+  padding: 6px 14px;
+  font-size: 0.85em;
+  background: #ecf0f1;
+  color: #555;
+}
+
+/* info rows */
+.info-row {
+  display: flex;
+  margin-bottom: 8px;
+  font-size: 0.9em;
+}
+.info-row .label {
+  width: 80px;
+  color: #999;
+  flex-shrink: 0;
+}
+.info-row .value { color: #333; word-break: break-all; }
+.mono { font-family: "Consolas", "Courier New", monospace; font-size: 0.85em; }
+
+/* desktop list */
+.desktop-list { margin: 16px 0; }
+.desktop-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #eee;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+.desktop-item:hover { border-color: #bbb; }
+.desktop-item input[type="radio"] { margin-right: 12px; }
+.desktop-name { font-weight: 600; }
+.desktop-meta { font-size: 0.8em; color: #999; margin-top: 2px; }
+
+/* actions */
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+/* ka status */
+.ka-status {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #eee;
+}
+
+/* sms */
+.sms-area {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed #ddd;
+}
+
+/* hints/errors */
+.hint { color: #999; font-size: 0.9em; }
+.error { color: #e74c3c; font-size: 0.9em; margin-top: 8px; min-height: 1.2em; }
+
+/* log box */
+.log-box {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border-radius: 6px;
+  padding: 12px;
+  height: 280px;
+  overflow-y: auto;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 0.82em;
+  line-height: 1.5;
+}
+.log-line { padding: 1px 0; }
+.log-info { color: #d4d4d4; }
+.log-warn { color: #f0ad4e; }
+.log-error { color: #e74c3c; }
+
+/* responsive */
+@media (max-width: 600px) {
+  #app { padding: 0 8px; margin: 10px auto; }
+  .card { padding: 16px; }
+  .form-row label { width: 72px; }
+  .actions .btn { flex: 1; min-width: 100px; }
+}

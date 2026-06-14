@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>移动云电脑保活</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>☁️ 移动云电脑保活</h1>
+    <div id="status-badge" class="badge badge-off">未登录</div>
+  </header>
+
+  <!-- 登录区 -->
+  <section id="login-section" class="card">
+    <h2>登录</h2>
+    <div class="form-row">
+      <label>账号</label>
+      <input type="text" id="username" placeholder="账号" autocomplete="username">
+    </div>
+    <div class="form-row">
+      <label>密码</label>
+      <input type="password" id="password" placeholder="密码" autocomplete="current-password">
+    </div>
+    <button id="btn-login" class="btn btn-primary">登录</button>
+
+    <!-- 短信验证（动态显示） -->
+    <div id="sms-section" class="sms-area" style="display:none">
+      <p id="sms-message" class="hint"></p>
+      <div class="form-row">
+        <label>手机号</label>
+        <input type="text" id="mobile" placeholder="手机号">
+      </div>
+      <div class="form-row sms-row">
+        <label>验证码</label>
+        <input type="text" id="sms-code" placeholder="验证码" maxlength="6">
+        <button id="btn-send-sms" class="btn btn-small">发送</button>
+      </div>
+      <button id="btn-verify" class="btn btn-primary">验证</button>
+    </div>
+    <p id="login-error" class="error"></p>
+  </section>
+
+  <!-- 控制台（登录后显示） -->
+  <section id="console-section" class="card" style="display:none">
+    <h2>桌面保活</h2>
+
+    <div class="info-row">
+      <span class="label">账号:</span>
+      <span id="info-username" class="value"></span>
+    </div>
+    <div class="info-row">
+      <span class="label">设备ID:</span>
+      <span id="info-device" class="value mono"></span>
+    </div>
+
+    <div class="form-row">
+      <label>保活间隔(秒)</label>
+      <input type="number" id="interval" value="300" min="30" max="3600">
+    </div>
+
+    <!-- 桌面列表 -->
+    <div id="desktop-list" class="desktop-list">
+      <p class="hint">加载中...</p>
+    </div>
+
+    <div class="actions">
+      <button id="btn-start" class="btn btn-success">▶ 启动保活</button>
+      <button id="btn-stop" class="btn btn-danger" disabled>■ 停止</button>
+      <button id="btn-refresh" class="btn btn-small">刷新桌面</button>
+      <button id="btn-logout" class="btn btn-small">登出</button>
+    </div>
+
+    <!-- 保活状态 -->
+    <div id="ka-status" class="ka-status" style="display:none">
+      <div class="info-row">
+        <span class="label">状态:</span>
+        <span id="ka-running" class="badge badge-on">运行中</span>
+      </div>
+      <div class="info-row">
+        <span class="label">轮次:</span>
+        <span id="ka-rounds" class="value"></span>
+      </div>
+      <div class="info-row">
+        <span class="label">运行时长:</span>
+        <span id="ka-uptime" class="value"></span>
+      </div>
+      <div class="info-row">
+        <span class="label">最近错误:</span>
+        <span id="ka-error" class="value"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="log-section" class="card">
+    <h2>实时日志</h2>
+    <div id="log-box" class="log-box"></div>
+  </section>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// 状态
+// ---------------------------------------------------------------------------
+var _loginType = "";
+var _lastLogSeq = 0;
+
+// ---------------------------------------------------------------------------
+// API helper
+// ---------------------------------------------------------------------------
+function api(method, url, body) {
+  var opts = {method: method, headers: {"Content-Type": "application/json"}};
+  if (body) opts.body = JSON.stringify(body);
+  return fetch(url, opts).then(function(r){ return r.json(); });
+}
+
+// ---------------------------------------------------------------------------
+// 登录
+// ---------------------------------------------------------------------------
+document.getElementById("btn-login").onclick = function() {
+  var u = document.getElementById("username").value.trim();
+  var p = document.getElementById("password").value;
+  if (!u || !p) { showError("请输入账号和密码"); return; }
+  setError("");
+  this.disabled = true;
+  this.textContent = "登录中...";
+  var self = this;
+  api("POST", "/api/login", {username: u, password: p}).then(function(res){
+    self.disabled = false;
+    self.textContent = "登录";
+    if (res.status === "success") {
+      onLoginSuccess();
+    } else if (res.status === "need_sms") {
+      showSmsSection(res);
+    } else {
+      showError(res.error || "登录失败");
+    }
+  }).catch(function(e){
+    self.disabled = false;
+    self.textContent = "登录";
+    showError("网络错误: " + e);
+  });
+};
+
+function showSmsSection(res) {
+  _loginType = res.login_type || "device_trust";
+  document.getElementById("sms-section").style.display = "block";
+  document.getElementById("sms-message").textContent = res.message || "需要短信验证";
+  if (res.mobile) {
+    document.getElementById("mobile").value = res.mobile;
+  }
+}
+
+document.getElementById("btn-send-sms").onclick = function() {
+  var mobile = document.getElementById("mobile").value.trim();
+  if (!mobile) { showError("请输入手机号"); return; }
+  var self = this;
+  self.disabled = true;
+  self.textContent = "发送中...";
+  api("POST", "/api/send-sms", {mobile: mobile}).then(function(res){
+    self.disabled = false;
+    self.textContent = "发送";
+    if (res.ok) {
+      setError("");
+      self.disabled = true;
+      self.textContent = "60s";
+      var n = 60;
+      var timer = setInterval(function(){
+        n--;
+        self.textContent = n + "s";
+        if (n <= 0) { clearInterval(timer); self.disabled = false; self.textContent = "发送"; }
+      }, 1000);
+    } else {
+      showError(res.error || "发送失败");
+    }
+  });
+};
+
+document.getElementById("btn-verify").onclick = function() {
+  var mobile = document.getElementById("mobile").value.trim();
+  var code = document.getElementById("sms-code").value.trim();
+  if (!code) { showError("请输入验证码"); return; }
+  setError("");
+  var self = this;
+  self.disabled = true;
+  self.textContent = "验证中...";
+  api("POST", "/api/verify-sms", {mobile: mobile, code: code, login_type: _loginType}).then(function(res){
+    self.disabled = false;
+    self.textContent = "验证";
+    if (res.status === "success") {
+      document.getElementById("sms-section").style.display = "none";
+      onLoginSuccess();
+    } else {
+      showError(res.error || "验证失败");
+    }
+  });
+};
+
+// ---------------------------------------------------------------------------
+// 登录成功后的 UI 切换
+// ---------------------------------------------------------------------------
+function onLoginSuccess() {
+  document.getElementById("login-section").style.display = "none";
+  document.getElementById("console-section").style.display = "block";
+  document.getElementById("status-badge").className = "badge badge-on";
+  document.getElementById("status-badge").textContent = "已登录";
+  loadStatus();
+  loadDesktops();
+}
+
+// ---------------------------------------------------------------------------
+// 状态 & 桌面列表
+// ---------------------------------------------------------------------------
+function loadStatus() {
+  api("GET", "/api/status").then(function(res){
+    if (res.logged_in) {
+      document.getElementById("info-username").textContent = res.username || "";
+      document.getElementById("info-device").textContent = res.device_uid || "";
+    }
+  });
+}
+
+function loadDesktops() {
+  var box = document.getElementById("desktop-list");
+  box.innerHTML = '<p class="hint">加载中...</p>';
+  api("GET", "/api/desktops").then(function(res){
+    if (res.error) {
+      box.innerHTML = '<p class="error">' + res.error + '</p>';
+      return;
+    }
+    if (!res.desktops || res.desktops.length === 0) {
+      box.innerHTML = '<p class="hint">没有可用桌面</p>';
+      return;
+    }
+    var html = "";
+    res.desktops.forEach(function(d, i){
+      html += '<label class="desktop-item">' +
+        '<input type="radio" name="desktop" value="' + d.instance_id + '" ' + (i===0?"checked":"") + '>' +
+        '<div class="desktop-info">' +
+        '<div class="desktop-name">' + (d.machine_name||"未命名") + '</div>' +
+        '<div class="desktop-meta mono">' + d.instance_id.substring(0,24) + '... · ' + (d.vendor||"") + ' · ' + (d.status||"?") + '</div>' +
+        '</div></label>';
+    });
+    box.innerHTML = html;
+  });
+}
+
+document.getElementById("btn-refresh").onclick = loadDesktops;
+
+// ---------------------------------------------------------------------------
+// 保活控制
+// ---------------------------------------------------------------------------
+document.getElementById("btn-start").onclick = function() {
+  var selected = document.querySelector('input[name="desktop"]:checked');
+  var instanceId = selected ? selected.value : "";
+  var interval = parseInt(document.getElementById("interval").value) || 300;
+  var self = this;
+  self.disabled = true;
+  api("POST", "/api/keepalive/start", {instance_id: instanceId, interval: interval}).then(function(res){
+    self.disabled = false;
+    if (res.error) {
+      showError(res.error);
+    } else {
+      setError("");
+      updateButtons(true);
+    }
+  });
+};
+
+document.getElementById("btn-stop").onclick = function() {
+  api("POST", "/api/keepalive/stop").then(function(res){
+    updateButtons(false);
+  });
+};
+
+document.getElementById("btn-logout").onclick = function() {
+  api("POST", "/api/logout").then(function(){
+    location.reload();
+  });
+};
+
+function updateButtons(running) {
+  document.getElementById("btn-start").disabled = running;
+  document.getElementById("btn-stop").disabled = !running;
+  document.getElementById("ka-status").style.display = running ? "block" : "none";
+}
+
+// ---------------------------------------------------------------------------
+// 轮询：保活状态 + 日志
+// ---------------------------------------------------------------------------
+setInterval(function(){
+  api("GET", "/api/keepalive/status").then(function(res){
+    updateButtons(res.running);
+    if (res.running) {
+      document.getElementById("ka-rounds").textContent = res.rounds || 0;
+      document.getElementById("ka-uptime").textContent = res.last_uptime || "-";
+      var errEl = document.getElementById("ka-error");
+      errEl.textContent = res.last_error || "无";
+      errEl.style.color = res.last_error ? "#e74c3c" : "#27ae60";
+    }
+  });
+}, 2000);
+
+setInterval(function(){
+  api("GET", "/api/logs?since=" + _lastLogSeq).then(function(res){
+    if (!res.logs || res.logs.length === 0) return;
+    var box = document.getElementById("log-box");
+    res.logs.forEach(function(log){
+      _lastLogSeq = Math.max(_lastLogSeq, log.seq);
+      var div = document.createElement("div");
+      div.className = "log-line log-" + log.level.toLowerCase();
+      div.textContent = "[" + log.time + "] " + log.msg;
+      box.appendChild(div);
+    });
+    // 限制 300 行
+    while (box.children.length > 300) box.removeChild(box.firstChild);
+    box.scrollTop = box.scrollHeight;
+  });
+}, 1500);
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+function showError(msg) { document.getElementById("login-error").textContent = msg; }
+function setError(msg) { document.getElementById("login-error").textContent = msg; }
+
+// 启动时检查登录状态
+api("GET", "/api/status").then(function(res){
+  if (res.logged_in) { onLoginSuccess(); }
+});
+</script>
+</body>
+</html>
