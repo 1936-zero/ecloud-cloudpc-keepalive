@@ -13,7 +13,6 @@ import re
 import socket
 import uuid as uuidlib
 import platform
-import subprocess
 from dataclasses import dataclass
 
 import config
