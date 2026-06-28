@@ -55,7 +55,30 @@ class DesktopSession:
         resp = self.http.post(config.Endpoint.DESKTOP_UPTIME, {
             "instanceId": self.instance_id,
         })
-        uptime = resp if isinstance(resp, str) else str(resp)
+        if resp is None:
+            raise EcloudError({
+                "errorCode": "NO_UPTIME",
+                "errorMessage": "desktopUptime 未返回运行时长，桌面可能已关机",
+            })
+        if isinstance(resp, dict):
+            uptime = (
+                resp.get("uptime")
+                or resp.get("upTime")
+                or resp.get("runningTime")
+                or resp.get("duration")
+            )
+            if not uptime:
+                raise EcloudError({
+                    "errorCode": "NO_UPTIME",
+                    "errorMessage": f"desktopUptime 未返回运行时长: {resp}",
+                })
+        else:
+            uptime = str(resp)
+        if not uptime or uptime == "None":
+            raise EcloudError({
+                "errorCode": "NO_UPTIME",
+                "errorMessage": "desktopUptime 未返回运行时长，桌面可能已关机",
+            })
         log.info("桌面 %s 运行时长: %s", self.instance_id[:16], uptime)
         return uptime
 

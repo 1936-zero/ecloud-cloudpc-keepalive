@@ -22,7 +22,41 @@
 **这证明：桌面会话保活不需要 SPICE 协议，不需要 uSmartView 二进制，纯 HTTP 即可。**
 （之前基于纯源码分析得出的"必须 SPICE 才能保活"的结论，已被抓包证伪。）
 
-## 安装
+## Docker 一键部署（推荐）
+
+适合不想配置 Python 环境的用户。服务器已安装 Docker / Docker Compose 后，直接复制这一行：
+
+```bash
+git clone https://github.com/1936-zero/ecloud-cloudpc-keepalive.git && cd ecloud-cloudpc-keepalive && docker compose up -d --build
+```
+
+启动后打开：
+
+```text
+http://服务器IP:8081/
+```
+
+本机部署也可以打开：
+
+```text
+http://127.0.0.1:8081/
+```
+
+首次进入 Web 页面后输入移动云账号密码登录，登录信息会保存到本地 `./data/cloud_pc.json`，容器重启不会丢。`data/` 和 `cloud_pc.json` 已加入 `.gitignore`，不要把账号、密码、token 提交到公开仓库。
+
+常用命令：
+
+```bash
+docker compose ps                 # 查看运行状态
+docker compose logs -f            # 查看实时日志
+docker compose restart            # 重启
+docker compose down               # 停止并删除容器，数据仍保留在 ./data
+docker compose up -d --build      # 更新代码后重新构建启动
+```
+
+如果 `8081` 端口被占用，修改 `docker-compose.yml` 里的端口映射，例如改成 `"18081:8080"`，然后访问 `http://服务器IP:18081/`。
+
+## Python 安装
 
 ```bash
 pip install -r requirements.txt

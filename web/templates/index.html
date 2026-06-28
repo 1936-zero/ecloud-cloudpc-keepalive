@@ -72,6 +72,7 @@
       <button id="btn-refresh" class="btn btn-small">刷新桌面</button>
       <button id="btn-logout" class="btn btn-small">登出</button>
     </div>
+    <p id="console-error" class="error"></p>
 
     <!-- 保活状态 -->
     <div id="ka-status" class="ka-status" style="display:none">
@@ -114,7 +115,22 @@ var _lastLogSeq = 0;
 function api(method, url, body) {
   var opts = {method: method, headers: {"Content-Type": "application/json"}};
   if (body) opts.body = JSON.stringify(body);
-  return fetch(url, opts).then(function(r){ return r.json(); });
+  return fetch(url, opts).then(function(r){
+    return r.text().then(function(text){
+      var data = {};
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          throw new Error("服务返回非 JSON: " + text.substring(0, 120));
+        }
+      }
+      if (!r.ok) {
+        throw new Error(data.error || ("HTTP " + r.status));
+      }
+      return data;
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -129,8 +145,6 @@ document.getElementById("btn-login").onclick = function() {
   this.textContent = "登录中...";
   var self = this;
   api("POST", "/api/login", {username: u, password: p}).then(function(res){
-    self.disabled = false;
-    self.textContent = "登录";
     if (res.status === "success") {
       onLoginSuccess();
     } else if (res.status === "need_sms") {
@@ -139,9 +153,10 @@ document.getElementById("btn-login").onclick = function() {
       showError(res.error || "登录失败");
     }
   }).catch(function(e){
+    showError("请求失败: " + e.message);
+  }).finally(function(){
     self.disabled = false;
     self.textContent = "登录";
-    showError("网络错误: " + e);
   });
 };
 
@@ -161,8 +176,6 @@ document.getElementById("btn-send-sms").onclick = function() {
   self.disabled = true;
   self.textContent = "发送中...";
   api("POST", "/api/send-sms", {mobile: mobile}).then(function(res){
-    self.disabled = false;
-    self.textContent = "发送";
     if (res.ok) {
       setError("");
       self.disabled = true;
@@ -174,8 +187,14 @@ document.getElementById("btn-send-sms").onclick = function() {
         if (n <= 0) { clearInterval(timer); self.disabled = false; self.textContent = "发送"; }
       }, 1000);
     } else {
+      self.disabled = false;
+      self.textContent = "发送";
       showError(res.error || "发送失败");
     }
+  }).catch(function(e){
+    self.disabled = false;
+    self.textContent = "发送";
+    showError("请求失败: " + e.message);
   });
 };
 
@@ -188,14 +207,17 @@ document.getElementById("btn-verify").onclick = function() {
   self.disabled = true;
   self.textContent = "验证中...";
   api("POST", "/api/verify-sms", {mobile: mobile, code: code, login_type: _loginType}).then(function(res){
-    self.disabled = false;
-    self.textContent = "验证";
     if (res.status === "success") {
       document.getElementById("sms-section").style.display = "none";
       onLoginSuccess();
     } else {
       showError(res.error || "验证失败");
     }
+  }).catch(function(e){
+    showError("请求失败: " + e.message);
+  }).finally(function(){
+    self.disabled = false;
+    self.textContent = "验证";
   });
 };
 
@@ -220,6 +242,8 @@ function loadStatus() {
       document.getElementById("info-username").textContent = res.username || "";
       document.getElementById("info-device").textContent = res.device_uid || "";
     }
+  }).catch(function(e){
+    showError("状态检查失败: " + e.message);
   });
 }
 
@@ -245,6 +269,8 @@ function loadDesktops() {
         '</div></label>';
     });
     box.innerHTML = html;
+  }).catch(function(e){
+    box.innerHTML = '<p class="error">加载桌面失败: ' + e.message + '</p>';
   });
 }
 
@@ -260,32 +286,62 @@ document.getElementById("btn-start").onclick = function() {
   var self = this;
   self.disabled = true;
   api("POST", "/api/keepalive/start", {instance_id: instanceId, interval: interval}).then(function(res){
-    self.disabled = false;
     if (res.error) {
       showError(res.error);
     } else {
       setError("");
       updateButtons(true);
     }
+  }).catch(function(e){
+    showError("启动失败: " + e.message);
+  }).finally(function(){
+    if (!document.getElementById("btn-stop").disabled) return;
+    self.disabled = false;
   });
 };
 
 document.getElementById("btn-stop").onclick = function() {
+  var self = this;
+  self.disabled = true;
   api("POST", "/api/keepalive/stop").then(function(res){
     updateButtons(false);
+  }).catch(function(e){
+    showError("停止失败: " + e.message);
+    self.disabled = false;
   });
 };
 
 document.getElementById("btn-logout").onclick = function() {
+  var self = this;
+  self.disabled = true;
   api("POST", "/api/logout").then(function(){
     location.reload();
+  }).catch(function(e){
+    showError("登出失败: " + e.message);
+    self.disabled = false;
   });
 };
 
-function updateButtons(running) {
+function statusLabel(health, running) {
+  if (!running) return "已停止";
+  if (health === "ok") return "保活正常";
+  if (health === "error") return "保活异常";
+  return "启动中";
+}
+
+function statusClass(health, running) {
+  if (!running) return "badge badge-off";
+  if (health === "error") return "badge badge-off";
+  return "badge badge-on";
+}
+
+function updateButtons(running, health) {
   document.getElementById("btn-start").disabled = running;
   document.getElementById("btn-stop").disabled = !running;
   document.getElementById("ka-status").style.display = running ? "block" : "none";
+  var badge = document.getElementById("ka-running");
+  badge.className = statusClass(health, running);
+  badge.textContent = statusLabel(health, running);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +349,7 @@ function updateButtons(running) {
 // ---------------------------------------------------------------------------
 setInterval(function(){
   api("GET", "/api/keepalive/status").then(function(res){
-    updateButtons(res.running);
+    updateButtons(res.running, res.health);
     if (res.running) {
       document.getElementById("ka-rounds").textContent = res.rounds || 0;
       document.getElementById("ka-uptime").textContent = res.last_uptime || "-";
@@ -301,6 +357,8 @@ setInterval(function(){
       errEl.textContent = res.last_error || "无";
       errEl.style.color = res.last_error ? "#e74c3c" : "#27ae60";
     }
+  }).catch(function(e){
+    console.error("keepalive status poll failed", e);
   });
 }, 2000);
 
@@ -318,18 +376,33 @@ setInterval(function(){
     // 限制 300 行
     while (box.children.length > 300) box.removeChild(box.firstChild);
     box.scrollTop = box.scrollHeight;
+  }).catch(function(e){
+    console.error("log poll failed", e);
   });
 }, 1500);
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-function showError(msg) { document.getElementById("login-error").textContent = msg; }
-function setError(msg) { document.getElementById("login-error").textContent = msg; }
+function activeErrorElement() {
+  var consoleSection = document.getElementById("console-section");
+  if (consoleSection && consoleSection.style.display !== "none") {
+    return document.getElementById("console-error");
+  }
+  return document.getElementById("login-error");
+}
+function showError(msg) { activeErrorElement().textContent = msg; }
+function setError(msg) {
+  document.getElementById("login-error").textContent = msg;
+  document.getElementById("console-error").textContent = msg;
+}
 
 // 启动时检查登录状态
 api("GET", "/api/status").then(function(res){
   if (res.logged_in) { onLoginSuccess(); }
+  else if (res.error) { showError(res.error); }
+}).catch(function(e){
+  showError("状态检查失败: " + e.message);
 });
 </script>
 </body>

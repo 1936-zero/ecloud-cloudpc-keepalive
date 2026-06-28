@@ -1,0 +1,14 @@
+services:
+  ecloud-keepalive:
+    build: .
+    image: ecloud-cloudpc-keepalive-imhansiy:local
+    container_name: ecloud-cloudpc-keepalive
+    user: "1000:1000"
+    environment:
+      CLOUD_PC_CONFIG_FILE: /app/data/cloud_pc.json
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+    command: ["web", "--host", "0.0.0.0", "--port", "8080"]

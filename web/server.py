@@ -21,6 +21,7 @@ import config
 import device
 import login
 import desktop_list
+import desktop_session
 from ecloud_client import EcloudHttpUtil, EcloudError
 from web.keepalive_manager import KeepaliveManager
 
@@ -29,7 +30,10 @@ log = logging.getLogger("web")
 # ---------------------------------------------------------------------------
 # 全局状态（单用户场景，无需 session/DB）
 # ---------------------------------------------------------------------------
-CONFIG_FILE = os.path.join(_PROJECT_ROOT, "cloud_pc.json")
+CONFIG_FILE = os.environ.get(
+    "CLOUD_PC_CONFIG_FILE",
+    os.path.join(_PROJECT_ROOT, "cloud_pc.json"),
+)
 
 _app_state = {
     "http": None,           # EcloudHttpUtil 实例（登录后创建）
@@ -38,9 +42,41 @@ _app_state = {
     "password": "",         # 待登录的密码（同上）
     "mobile": "",           # 短信验证手机号
     "login_type": "",       # 当前登录分支: device_trust / two_factor / enhanced_sms
+    "login_code": None,     # 未授信设备信任流程需要的服务端 code
 }
 _lock = threading.Lock()
 _ka = KeepaliveManager()
+
+
+def _token_maybe_expired(err: EcloudError) -> bool:
+    msg = (err.message or "").lower()
+    return any(h in msg for h in ["token", "失效", "未登录", "expire", "401", "授权"])
+
+
+def _preflight_uptime(http: EcloudHttpUtil, instance_id: str) -> str:
+    """Use desktopUptime as the runtime source of truth before starting keepalive."""
+    if not instance_id:
+        raise EcloudError({
+            "errorCode": "NO_INSTANCE",
+            "errorMessage": "缺少桌面实例 ID",
+        })
+    return desktop_session.DesktopSession(http, instance_id).report_uptime()
+
+
+def _safe_log_obj(obj):
+    """Return a JSON-safe copy with sensitive values redacted for diagnostics."""
+    sensitive = {
+        "password", "accessToken", "access_token", "accessTicket",
+        "access_ticket", "verificationCode", "token",
+    }
+    if isinstance(obj, dict):
+        return {
+            k: ("[redacted]" if k in sensitive else _safe_log_obj(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_safe_log_obj(v) for v in obj]
+    return obj
 
 
 def _load_cfg() -> dict:
@@ -78,6 +114,32 @@ def _set_token(token: str):
             _app_state["http"].set_token(token)
 
 
+def _relogin_with_saved_credentials() -> str | None:
+    """Use saved username/password to refresh an expired access token."""
+    with _lock:
+        cfg_state = _app_state.get("cfg", {})
+        username = _app_state.get("username") or cfg_state.get("username", "")
+        password = _app_state.get("password") or cfg_state.get("password", "")
+    if not username or not password:
+        return None
+
+    http = _get_or_create_http()
+    http.clear_token()
+    result = login.login_with_password(http, username, password)
+    log.info("auto relogin result: %s", json.dumps(_safe_log_obj({
+        "status": result.get("status"),
+        "error_code": result.get("error_code"),
+        "error": result.get("error"),
+        "mobile_present": bool(result.get("mobile")),
+        "login_code_present": bool(result.get("login_code")),
+    }), ensure_ascii=False))
+    if result.get("status") == login.LoginResult.SUCCESS and result.get("access_token"):
+        token = result["access_token"]
+        _set_token(token)
+        return token
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -102,13 +164,44 @@ def create_app() -> Flask:
     @app.route("/api/status")
     def api_status():
         cfg = _app_state["cfg"]
-        logged_in = bool(cfg.get("access_token"))
-        return jsonify({
+        logged_in = False
+        error = ""
+        if cfg.get("access_token"):
+            try:
+                http = _get_or_create_http()
+                login.get_user_info(http)
+                logged_in = True
+            except EcloudError as e:
+                if _token_maybe_expired(e):
+                    log.info("saved token rejected by user-info check: %s", e.message)
+                    if _relogin_with_saved_credentials():
+                        logged_in = True
+                    else:
+                        error = e.message
+                else:
+                    log.info("user-info check failed, falling back to desktop list: %s", e.message)
+                    try:
+                        desktop_list.get_desktop_list(_get_or_create_http())
+                        logged_in = True
+                    except EcloudError as e2:
+                        log.info("saved token rejected by desktop-list check: %s", e2.message)
+                        if _token_maybe_expired(e2) and _relogin_with_saved_credentials():
+                            logged_in = True
+                        else:
+                            error = e2.message
+            except Exception as e:
+                error = str(e)
+                log.warning("saved token check failed: %s", e)
+
+        payload = {
             "logged_in": logged_in,
             "username": cfg.get("username", ""),
             "device_uid": cfg.get("device_uid", ""),
             "keepalive": _ka.get_status(),
-        })
+        }
+        if error:
+            payload["error"] = error
+        return jsonify(payload)
 
     # -----------------------------------------------------------------------
     # 登录
@@ -122,7 +215,15 @@ def create_app() -> Flask:
             return jsonify({"status": "failed", "error": "账号和密码不能为空"}), 400
 
         http = _get_or_create_http()
+        http.clear_token()
         result = login.login_with_password(http, username, password)
+        log.info("login result: %s", json.dumps(_safe_log_obj({
+            "status": result.get("status"),
+            "error_code": result.get("error_code"),
+            "error": result.get("error"),
+            "mobile_present": bool(result.get("mobile")),
+            "login_code_present": bool(result.get("login_code")),
+        }), ensure_ascii=False))
 
         with _lock:
             _app_state["username"] = username
@@ -140,6 +241,7 @@ def create_app() -> Flask:
             with _lock:
                 _app_state["mobile"] = result.get("mobile", "")
                 _app_state["login_type"] = "device_trust"
+                _app_state["login_code"] = result.get("login_code")
             return jsonify({
                 "status": "need_sms",
                 "mobile": result.get("mobile", ""),
@@ -151,6 +253,7 @@ def create_app() -> Flask:
             with _lock:
                 _app_state["mobile"] = result.get("mobile", "")
                 _app_state["login_type"] = "two_factor"
+                _app_state["login_code"] = result.get("login_code")
             return jsonify({
                 "status": "need_sms",
                 "mobile": result.get("mobile", ""),
@@ -162,6 +265,7 @@ def create_app() -> Flask:
             with _lock:
                 _app_state["mobile"] = result.get("mobile", "")
                 _app_state["login_type"] = "enhanced_sms"
+                _app_state["login_code"] = result.get("login_code")
             return jsonify({
                 "status": "need_sms",
                 "mobile": result.get("mobile", ""),
@@ -183,15 +287,28 @@ def create_app() -> Flask:
         mobile = data.get("mobile", "").strip()
         with _lock:
             mobile = mobile or _app_state.get("mobile", "")
+            login_type = _app_state.get("login_type", "")
+            username = _app_state.get("username", "")
         if not mobile:
             return jsonify({"ok": False, "error": "缺少手机号"}), 400
         http = _get_or_create_http()
         try:
-            login.send_sms(http, mobile)
+            if login_type == "two_factor":
+                sms_resp = login.send_two_factor_sms(http, mobile, username)
+            else:
+                sms_resp = login.send_sms(http, mobile)
             with _lock:
                 _app_state["mobile"] = mobile
+                if isinstance(sms_resp, dict) and sms_resp.get("code"):
+                    _app_state["login_code"] = sms_resp.get("code")
+            log.info("send sms ok: login_type=%s mobile_present=%s code_present=%s",
+                     login_type, bool(mobile),
+                     isinstance(sms_resp, dict) and bool(sms_resp.get("code")))
             return jsonify({"ok": True, "message": "短信已发送"})
         except EcloudError as e:
+            log.warning("send sms failed: login_type=%s error=%s raw=%s",
+                        login_type, e.message,
+                        json.dumps(_safe_log_obj(e.resp), ensure_ascii=False))
             return jsonify({"ok": False, "error": e.message}), 200
 
     @app.route("/api/verify-sms", methods=["POST"])
@@ -208,11 +325,14 @@ def create_app() -> Flask:
             login_type = login_type or _app_state.get("login_type", "device_trust")
             username = _app_state.get("username", "")
             password = _app_state.get("password", "")
+            login_code = _app_state.get("login_code")
 
         http = _get_or_create_http()
+        log.info("verify sms start: login_type=%s mobile_present=%s username_present=%s login_code_present=%s",
+                 login_type, bool(mobile), bool(username), bool(login_code))
         try:
             if login_type == "device_trust":
-                r = login.complete_device_trust(http, mobile, code, username)
+                r = login.complete_device_trust(http, mobile, code, username, code=login_code)
             elif login_type == "two_factor":
                 r = login.complete_two_factor(http, mobile, username, password, code)
             elif login_type == "enhanced_sms":
@@ -220,13 +340,26 @@ def create_app() -> Flask:
             else:
                 return jsonify({"status": "failed", "error": f"未知登录类型: {login_type}"})
         except EcloudError as e:
-            return jsonify({"status": "failed", "error": e.message})
+            log.warning("verify sms api error: login_type=%s error=%s raw=%s",
+                        login_type, e.message,
+                        json.dumps(_safe_log_obj(e.resp), ensure_ascii=False))
+            return jsonify({
+                "status": "failed",
+                "error": e.message,
+                "error_code": e.code,
+            })
 
         if r["status"] == login.LoginResult.SUCCESS:
             token = r["access_token"]
             _set_token(token)
             return jsonify({"status": "success", "token": token[:20] + "..."})
-        return jsonify({"status": "failed", "error": r.get("error", "验证失败")})
+        log.warning("verify sms failed: login_type=%s result=%s",
+                    login_type, json.dumps(_safe_log_obj(r), ensure_ascii=False))
+        return jsonify({
+            "status": "failed",
+            "error": r.get("error", "验证失败"),
+            "raw": _safe_log_obj(r.get("raw")),
+        })
 
     # -----------------------------------------------------------------------
     # 桌面列表
@@ -270,36 +403,69 @@ def create_app() -> Flask:
 
         data = request.get_json(silent=True) or {}
         instance_id = data.get("instance_id", "")
-        interval = data.get("interval", 300)
+        try:
+            interval = int(data.get("interval", 300))
+        except (TypeError, ValueError):
+            return jsonify({"error": "保活间隔必须是数字"}), 400
+        if interval < 30:
+            interval = 30
 
         http = _get_or_create_http()
+
+        def _relogin():
+            """token 失效重登回调。"""
+            return _relogin_with_saved_credentials()
+
+        def _call_with_relogin(fn):
+            try:
+                return fn()
+            except EcloudError as e:
+                if _token_maybe_expired(e) and _relogin():
+                    return fn()
+                raise
 
         # 自动选桌面
         if not instance_id:
             try:
-                desktops = desktop_list.get_desktop_list(http)
+                desktops = _call_with_relogin(lambda: desktop_list.get_desktop_list(http))
                 if not desktops:
                     return jsonify({"error": "账号下没有可用桌面"})
-                instance_id = desktops[0].instance_id
+                try:
+                    statuses = _call_with_relogin(lambda: desktop_list.get_desktop_status(http, desktops))
+                except EcloudError as e:
+                    statuses = {}
+                    log.info("desktop status unavailable during start preflight: %s", e.message)
+
+                selected = None
+                preflight_errors = []
+                for d in desktops:
+                    st = statuses.get(d.instance_id, "")
+                    try:
+                        uptime = _call_with_relogin(lambda d=d: _preflight_uptime(http, d.instance_id))
+                    except EcloudError as e:
+                        label = d.machine_name or d.instance_id[:20] or "未知桌面"
+                        state = f", status={st}" if st else ""
+                        preflight_errors.append(f"{label}{state}: {e.message}")
+                    else:
+                        log.info("desktop preflight ok: instance=%s status=%s uptime=%s",
+                                 d.instance_id[:20], st or "?", uptime)
+                        selected = d
+                        break
+                if selected is None:
+                    detail = preflight_errors[0] if preflight_errors else "desktopUptime 未返回运行时长"
+                    return jsonify({"error": f"没有可保活桌面：{detail}"})
+                instance_id = selected.instance_id
                 cfg["instance_id"] = instance_id
-                cfg["machine_id"] = desktops[0].machine_id
+                cfg["machine_id"] = selected.machine_id
                 _save_cfg(cfg)
             except EcloudError as e:
                 return jsonify({"error": f"拉取桌面列表失败: {e.message}"})
-
-        def _relogin():
-            """token 失效重登回调。"""
-            with _lock:
-                u = _app_state.get("username", "")
-                p = _app_state.get("password", "")
-            if not u or not p:
-                return None
-            http2 = _get_or_create_http()
-            result = login.login_with_password(http2, u, p)
-            if result["status"] == login.LoginResult.SUCCESS and result["access_token"]:
-                _set_token(result["access_token"])
-                return result["access_token"]
-            return None
+        else:
+            try:
+                uptime = _call_with_relogin(lambda: _preflight_uptime(http, instance_id))
+                log.info("desktop preflight ok: instance=%s uptime=%s", instance_id[:20], uptime)
+            except EcloudError as e:
+                return jsonify({"error": f"桌面不可保活: {e.message}"})
 
         ok = _ka.start(http, instance_id, interval=interval, relogin_fn=_relogin)
         if not ok:

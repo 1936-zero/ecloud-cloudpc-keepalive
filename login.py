@@ -13,6 +13,7 @@ verifyAccessTicket (line 448-480):
   POST /login/verifyAccessTicket {accessTicket} → accessToken
 """
 import time
+import json
 
 import config
 from ecloud_client import EcloudHttpUtil, EcloudError
@@ -25,6 +26,24 @@ class LoginResult:
     NEED_ENHANCED_SMS = "need_enhanced_sms"      # 30002063
     NEED_4A = "need_4a"
     FAILED = "failed"
+
+
+def _extract_error(resp: dict) -> str:
+    """Extract a useful server-side failure message from a decoded response."""
+    if not isinstance(resp, dict):
+        return str(resp)
+    for key in (
+        "errorMessage", "message", "msg", "resultMsg", "resultMessage",
+        "returnMessage", "desc", "description",
+    ):
+        if resp.get(key):
+            return str(resp[key])
+    body = resp.get("body")
+    if isinstance(body, dict):
+        nested = _extract_error(body)
+        if nested and nested != "{}":
+            return nested
+    return json.dumps(resp, ensure_ascii=False)[:500]
 
 
 def login_with_password(http: EcloudHttpUtil, username: str, password: str) -> dict:
@@ -70,7 +89,14 @@ def _classify_login_error(e: EcloudError, username: str) -> dict:
         except Exception:
             body = {}
     mobile = body.get("mobile", "") if isinstance(body, dict) else ""
-    common = {"mobile": mobile, "raw": resp, "error": e.message, "error_code": code}
+    login_code = body.get("code") if isinstance(body, dict) else None
+    common = {
+        "mobile": mobile,
+        "login_code": login_code,
+        "raw": resp,
+        "error": e.message,
+        "error_code": code,
+    }
 
     if code == config.LoginError.UNTRUSTED_DEVICE:
         return {"status": LoginResult.NEED_DEVICE_TRUST, **common}
@@ -88,7 +114,12 @@ def _classify_dict_error(resp: dict, username: str) -> dict:
     code = str(resp.get("errorCode", ""))
     body = resp.get("body", {}) if isinstance(resp.get("body"), dict) else {}
     mobile = body.get("mobile", "")
-    common = {"mobile": mobile, "raw": resp, "error_code": code}
+    common = {
+        "mobile": mobile,
+        "login_code": body.get("code"),
+        "raw": resp,
+        "error_code": code,
+    }
     if code == config.LoginError.UNTRUSTED_DEVICE:
         return {"status": LoginResult.NEED_DEVICE_TRUST, **common}
     if code == config.LoginError.TWO_FACTOR_AUTH:
@@ -121,6 +152,24 @@ def send_sms(http: EcloudHttpUtil, mobile: str, code_type: str = "login") -> dic
     })
 
 
+def verify_sms(http: EcloudHttpUtil, mobile: str, verification_code: str,
+               code_type: str = "login") -> dict:
+    """验证通用短信验证码，部分登录分支会返回后续接口需要的 code。"""
+    return http.post(config.Endpoint.LOGIN_VERIFY_SMS, {
+        "mobile": mobile,
+        "verificationCode": verification_code,
+        "codeType": code_type,
+    })
+
+
+def send_two_factor_sms(http: EcloudHttpUtil, mobile: str, username: str) -> dict:
+    """发送二次验证短信。"""
+    return http.post(config.Endpoint.LOGIN_AUTH_TWOFACTOR_GET, {
+        "mobile": mobile,
+        "userName": username,
+    })
+
+
 def complete_device_trust(http: EcloudHttpUtil, mobile: str,
                           verification_code: str, login_username: str = "",
                           is_temporary: bool = False, code: str | None = None) -> dict:
@@ -128,6 +177,16 @@ def complete_device_trust(http: EcloudHttpUtil, mobile: str,
     未授信设备 → 短信验证后信任/临时设备 (user.js loginTrustDevice line 647-697)。
     code 字段来自登录响应 body.code（line 296），trustDevice 需要带上它。
     """
+    if not code:
+        verify_resp = verify_sms(http, mobile, verification_code)
+        if isinstance(verify_resp, dict):
+            code = verify_resp.get("code") or verify_resp.get("verifyCode")
+            ticket = verify_resp.get("accessTicket")
+            if ticket:
+                token = _exchange_ticket(http, ticket)
+                return {"status": LoginResult.SUCCESS, "access_ticket": ticket,
+                        "access_token": token}
+
     payload = {
         "mobile": mobile,
         "verificationCode": verification_code,
@@ -140,7 +199,7 @@ def complete_device_trust(http: EcloudHttpUtil, mobile: str,
     ticket = resp.get("accessTicket") if isinstance(resp, dict) else None
     if not ticket:
         return {"status": LoginResult.FAILED, "raw": resp,
-                "error": "信任设备后未返回 accessTicket"}
+                "error": _extract_error(resp) or "信任设备后未返回 accessTicket"}
 
     is_temp_val = 1 if is_temporary else 0
     http.post(config.Endpoint.LOGIN_TEMPORARY_DEVICE, {
@@ -154,13 +213,8 @@ def complete_device_trust(http: EcloudHttpUtil, mobile: str,
 def complete_two_factor(http: EcloudHttpUtil, mobile: str, username: str,
                         password: str, verification_code: str) -> dict:
     """
-    二次验证短信 (user.js:709 special/getSecondauthSms → verifyTwoFactorAuthSms)。
+    二次验证短信验证。短信发送由调用方先调用 send_two_factor_sms 完成。
     """
-    # 1. 发送二次验证短信
-    http.post(config.Endpoint.LOGIN_AUTH_TWOFACTOR_GET, {
-        "mobile": mobile, "userName": username,
-    })
-    # 2. 验证
     resp = http.post(config.Endpoint.LOGIN_AUTH_TWOFACTOR, {
         "mobile": mobile, "userName": username,
         "verificationCode": verification_code,
@@ -171,7 +225,7 @@ def complete_two_factor(http: EcloudHttpUtil, mobile: str, username: str,
         token = _exchange_ticket(http, ticket)
         return {"status": LoginResult.SUCCESS, "access_ticket": ticket,
                 "access_token": token}
-    return {"status": LoginResult.FAILED, "raw": resp}
+    return {"status": LoginResult.FAILED, "raw": resp, "error": _extract_error(resp)}
 
 
 def complete_enhanced_sms(http: EcloudHttpUtil, mobile: str, username: str,
@@ -189,7 +243,7 @@ def complete_enhanced_sms(http: EcloudHttpUtil, mobile: str, username: str,
         token = _exchange_ticket(http, ticket)
         return {"status": LoginResult.SUCCESS, "access_ticket": ticket,
                 "access_token": token}
-    return {"status": LoginResult.FAILED, "raw": resp}
+    return {"status": LoginResult.FAILED, "raw": resp, "error": _extract_error(resp)}
 
 
 def logout(http: EcloudHttpUtil) -> None:

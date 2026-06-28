@@ -115,23 +115,23 @@ def select_running_desktop(http: EcloudHttpUtil) -> Desktop | None:
     if not desktops:
         log.warning("没有可用桌面")
         return None
-    if len(desktops) == 1:
-        log.info("唯一桌面: %s", desktops[0])
-        return desktops[0]
 
-    # 多个桌面，查状态选运行中的
+    # 查状态选运行中的。即使只有一个桌面，也不能把 shutdown 当作可保活目标。
     try:
         statuses = get_desktop_status(http, desktops)
         for d in desktops:
             st = statuses.get(d.instance_id, "")
             d.status = st
-            # resourceStatus 运行中的值（需抓包确认，常见: running/active/1）
-            if st and st.lower() in ("running", "active", "1", "on", "up"):
+            # resourceStatus 可保活的值。available 会返回 desktopUptime。
+            if st and st.lower() in ("running", "active", "available", "1", "on", "up"):
                 log.info("选中运行中的桌面: %s (status=%s)", d, st)
                 return d
+        if statuses:
+            log.warning("没有正在运行的桌面: %s", statuses)
+            return None
     except EcloudError as e:
         log.warning("查询桌面状态失败（忽略）: %s", e)
 
-    # 找不到明确运行中的，返回第一个
+    # 状态接口不可用时保持兼容：返回第一个。
     log.info("无法确定运行状态，默认选第一个: %s", desktops[0])
     return desktops[0]

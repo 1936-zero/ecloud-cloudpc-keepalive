@@ -30,6 +30,9 @@ class KeepaliveManager:
         self._last_uptime = ""
         self._last_error = ""
         self._started_at: datetime | None = None
+        self._last_success_at: datetime | None = None
+        self._consecutive_errors = 0
+        self._log_seq = 0
         # 日志缓存（最近 200 条）
         self._logs: deque[dict] = deque(maxlen=200)
 
@@ -37,15 +40,27 @@ class KeepaliveManager:
         return self._running
 
     def get_status(self) -> dict:
-        return {
-            "running": self._running,
-            "instance_id": self._instance_id,
-            "interval": self._interval,
-            "rounds": self._rounds,
-            "last_uptime": self._last_uptime,
-            "last_error": self._last_error,
-            "started_at": self._started_at.isoformat() if self._started_at else None,
-        }
+        with self._lock:
+            if not self._running:
+                health = "stopped"
+            elif self._last_error:
+                health = "error"
+            elif self._last_uptime:
+                health = "ok"
+            else:
+                health = "starting"
+            return {
+                "running": self._running,
+                "health": health,
+                "instance_id": self._instance_id,
+                "interval": self._interval,
+                "rounds": self._rounds,
+                "last_uptime": self._last_uptime,
+                "last_error": self._last_error,
+                "consecutive_errors": self._consecutive_errors,
+                "started_at": self._started_at.isoformat() if self._started_at else None,
+                "last_success_at": self._last_success_at.isoformat() if self._last_success_at else None,
+            }
 
     def get_logs(self, since: int = 0) -> list[dict]:
         """返回序号 > since 的日志。"""
@@ -53,13 +68,14 @@ class KeepaliveManager:
             return [log for log in self._logs if log["seq"] > since]
 
     def _log(self, level: str, msg: str):
-        entry = {
-            "seq": int(time.time() * 1000),
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "level": level,
-            "msg": msg,
-        }
         with self._lock:
+            self._log_seq = max(self._log_seq + 1, int(time.time() * 1000))
+            entry = {
+                "seq": self._log_seq,
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "level": level,
+                "msg": msg,
+            }
             self._logs.append(entry)
 
     def start(self, http: EcloudHttpUtil, instance_id: str,
@@ -74,6 +90,8 @@ class KeepaliveManager:
             self._rounds = 0
             self._last_uptime = ""
             self._last_error = ""
+            self._last_success_at = None
+            self._consecutive_errors = 0
             self._started_at = datetime.now()
             self._stop_event.clear()
 
@@ -111,10 +129,13 @@ class KeepaliveManager:
                 with self._lock:
                     self._last_uptime = uptime
                     self._last_error = ""
+                    self._last_success_at = datetime.now()
+                    self._consecutive_errors = 0
                 self._log("INFO", f"[{current_round}] 保活成功: {uptime}")
             except EcloudError as e:
                 with self._lock:
                     self._last_error = f"[{e.code}] {e.message}"
+                    self._consecutive_errors += 1
                 self._log("WARN", f"[{current_round}] 保活失败: {e.message}")
                 # token 失效尝试重登
                 if relogin_fn and _token_maybe_expired(e):
@@ -131,6 +152,7 @@ class KeepaliveManager:
             except Exception as e:
                 with self._lock:
                     self._last_error = str(e)
+                    self._consecutive_errors += 1
                 self._log("ERROR", f"[{current_round}] 保活异常: {e}")
 
             # 等待 interval 秒，但每秒检查 stop 信号（便于快速停止）

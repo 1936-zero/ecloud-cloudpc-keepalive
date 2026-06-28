@@ -10,6 +10,9 @@ __pycache__/
 venv/
 env/
 
+# Docker/runtime data
+data/
+
 # IDE
 .vscode/
 .idea/

@@ -31,7 +31,10 @@ import keepalive
 import login
 from ecloud_client import EcloudHttpUtil, EcloudError
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud_pc.json")
+CONFIG_FILE = os.environ.get(
+    "CLOUD_PC_CONFIG_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud_pc.json"),
+)
 
 log = logging.getLogger("cloudpc")
 
