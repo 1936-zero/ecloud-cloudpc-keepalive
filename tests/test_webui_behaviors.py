@@ -73,6 +73,28 @@ class KeepaliveManagerTests(unittest.TestCase):
         self.assertEqual(status["health"], "error")
         self.assertTrue(status["running"])
 
+    def test_relogin_retries_keepalive_and_clears_stale_token_error(self):
+        manager = KeepaliveManager()
+        manager._running = True
+        fake_http = Mock()
+        relogin = Mock(return_value="fresh-token")
+        session = Mock()
+        session.report_uptime.side_effect = [
+            EcloudError({"errorCode": "401", "errorMessage": "token失效"}),
+            "1小时2分3秒",
+        ]
+
+        with patch("web.keepalive_manager.desktop_session.DesktopSession", return_value=session), \
+             patch("web.keepalive_manager.time.sleep", side_effect=lambda _seconds: manager._stop_event.set()):
+            manager._run(fake_http, "CCA-test", 1, relogin)
+
+        self.assertEqual(session.report_uptime.call_count, 2)
+        relogin.assert_called_once()
+        fake_http.set_token.assert_called_once_with("fresh-token")
+        self.assertEqual(manager._last_error, "")
+        self.assertEqual(manager._consecutive_errors, 0)
+        self.assertEqual(manager._last_uptime, "1小时2分3秒")
+
 
 class DesktopStartPreflightTests(unittest.TestCase):
     def test_preflight_uses_desktop_uptime_not_status_enum_guess(self):

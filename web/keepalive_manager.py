@@ -78,6 +78,13 @@ class KeepaliveManager:
             }
             self._logs.append(entry)
 
+    def _record_success(self, uptime: str):
+        with self._lock:
+            self._last_uptime = uptime
+            self._last_error = ""
+            self._last_success_at = datetime.now()
+            self._consecutive_errors = 0
+
     def start(self, http: EcloudHttpUtil, instance_id: str,
               interval: int = 300, relogin_fn=None) -> bool:
         """启动保活线程。已在运行则返回 False。"""
@@ -126,11 +133,7 @@ class KeepaliveManager:
                 current_round = self._rounds
             try:
                 uptime = session.report_uptime()
-                with self._lock:
-                    self._last_uptime = uptime
-                    self._last_error = ""
-                    self._last_success_at = datetime.now()
-                    self._consecutive_errors = 0
+                self._record_success(uptime)
                 self._log("INFO", f"[{current_round}] 保活成功: {uptime}")
             except EcloudError as e:
                 with self._lock:
@@ -144,7 +147,19 @@ class KeepaliveManager:
                         token = relogin_fn()
                         if token:
                             http.set_token(token)
-                            self._log("INFO", "重新登录成功，继续保活")
+                            self._log("INFO", "重新登录成功，立即重试保活")
+                            try:
+                                uptime = session.report_uptime()
+                                self._record_success(uptime)
+                                self._log("INFO", f"[{current_round}] 保活成功: {uptime}")
+                            except EcloudError as retry_err:
+                                with self._lock:
+                                    self._last_error = f"[{retry_err.code}] {retry_err.message}"
+                                self._log("WARN", f"[{current_round}] 重登后保活仍失败: {retry_err.message}")
+                            except Exception as retry_ex:
+                                with self._lock:
+                                    self._last_error = str(retry_ex)
+                                self._log("ERROR", f"[{current_round}] 重登后保活异常: {retry_ex}")
                         else:
                             self._log("ERROR", "重新登录失败")
                     except Exception as ex:
