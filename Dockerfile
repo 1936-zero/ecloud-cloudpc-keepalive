@@ -2,6 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    TZ=Asia/Shanghai \
     CLOUD_PC_CONFIG_FILE=/app/data/cloud_pc.json
 
 WORKDIR /app

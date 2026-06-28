@@ -5,6 +5,7 @@ services:
     container_name: ecloud-cloudpc-keepalive
     user: "1000:1000"
     environment:
+      TZ: Asia/Shanghai
       CLOUD_PC_CONFIG_FILE: /app/data/cloud_pc.json
     volumes:
       - ./data:/app/data
