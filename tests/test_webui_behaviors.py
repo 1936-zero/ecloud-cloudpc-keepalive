@@ -1,4 +1,6 @@
+import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -97,6 +99,18 @@ class KeepaliveManagerTests(unittest.TestCase):
 
 
 class DesktopStartPreflightTests(unittest.TestCase):
+    def test_save_cfg_writes_valid_json_without_temp_file_leftovers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "cloud_pc.json"
+            with patch("web.server.CONFIG_FILE", str(cfg_path)):
+                server._save_cfg({"keepalive_autostart": True, "keepalive_interval": 300})
+
+            self.assertEqual(
+                json.loads(cfg_path.read_text(encoding="utf-8")),
+                {"keepalive_autostart": True, "keepalive_interval": 300},
+            )
+            self.assertEqual(list(Path(tmpdir).glob("*.tmp")), [])
+
     def test_preflight_uses_desktop_uptime_not_status_enum_guess(self):
         class FakeHttp:
             common_params = {}
@@ -118,7 +132,8 @@ class DesktopStartPreflightTests(unittest.TestCase):
 
         with patch("web.server.desktop_list.get_desktop_status", return_value={"CCA-test": "mystery"}), \
              patch("web.server._preflight_uptime", return_value="0小时1分2秒"), \
-             patch.object(server._ka, "start", return_value=True) as start:
+             patch.object(server._ka, "start", return_value=True) as start, \
+             patch("web.server._save_cfg") as save_cfg:
             data = app.test_client().post(
                 "/api/keepalive/start",
                 json={"instance_id": "CCA-test", "interval": 60},
@@ -126,6 +141,69 @@ class DesktopStartPreflightTests(unittest.TestCase):
 
         self.assertTrue(data["ok"])
         start.assert_called_once()
+        self.assertTrue(server._app_state["cfg"]["keepalive_autostart"])
+        self.assertEqual(server._app_state["cfg"]["keepalive_interval"], 60)
+        save_cfg.assert_called_once()
+
+    def test_stop_disables_persisted_autostart(self):
+        app = server.create_app()
+        server._app_state["cfg"] = {"keepalive_autostart": True}
+        events = []
+
+        def save_cfg(cfg):
+            events.append(("save", cfg["keepalive_autostart"]))
+
+        def stop():
+            events.append(("stop", None))
+            return False
+
+        with patch.object(server._ka, "stop", side_effect=stop) as stop_mock, \
+             patch("web.server._save_cfg", side_effect=save_cfg) as save_cfg_mock:
+            data = app.test_client().post("/api/keepalive/stop").get_json()
+
+        self.assertFalse(data["ok"])
+        stop_mock.assert_called_once()
+        self.assertFalse(server._app_state["cfg"]["keepalive_autostart"])
+        save_cfg_mock.assert_called_once()
+        self.assertEqual(events, [("save", False), ("stop", None)])
+
+    def test_autostart_starts_keepalive_from_config(self):
+        server._app_state["cfg"] = {
+            "access_token": "valid-token",
+            "instance_id": "CCA-test",
+            "keepalive_autostart": True,
+            "keepalive_interval": 60,
+        }
+        fake_http = object()
+        server._app_state["http"] = fake_http
+
+        with patch.object(server._ka, "is_running", return_value=False), \
+             patch.object(server._ka, "start", return_value=True) as start:
+            self.assertTrue(server._ensure_keepalive_autostart("test"))
+
+        start.assert_called_once()
+        args, kwargs = start.call_args
+        self.assertIs(args[0], fake_http)
+        self.assertEqual(args[1], "CCA-test")
+        self.assertEqual(kwargs["interval"], 60)
+
+    def test_autostart_reloads_config_when_memory_state_is_stale(self):
+        server._app_state["cfg"] = {"keepalive_autostart": False}
+        fake_http = object()
+        server._app_state["http"] = fake_http
+
+        with patch("web.server._load_cfg", return_value={
+            "access_token": "valid-token",
+            "instance_id": "CCA-test",
+            "keepalive_autostart": True,
+            "keepalive_interval": 90,
+        }), patch.object(server._ka, "is_running", return_value=False), \
+             patch.object(server._ka, "start", return_value=True) as start:
+            self.assertTrue(server._ensure_keepalive_autostart("test"))
+
+        start.assert_called_once()
+        self.assertTrue(server._app_state["cfg"]["keepalive_autostart"])
+        self.assertEqual(start.call_args.kwargs["interval"], 90)
 
 
 class FrontendRegressionTests(unittest.TestCase):

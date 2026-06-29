@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import threading
+import time
 
 from flask import Flask, request, jsonify, render_template
 
@@ -46,6 +47,9 @@ _app_state = {
 }
 _lock = threading.Lock()
 _ka = KeepaliveManager()
+_watchdog_lock = threading.Lock()
+_watchdog_started = False
+_WATCHDOG_INTERVAL = int(os.environ.get("CLOUD_PC_KEEPALIVE_WATCHDOG_INTERVAL", "60"))
 
 
 def _token_maybe_expired(err: EcloudError) -> bool:
@@ -87,8 +91,25 @@ def _load_cfg() -> dict:
 
 
 def _save_cfg(cfg: dict):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    tmp_file = f"{CONFIG_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_file, CONFIG_FILE)
+    finally:
+        if os.path.exists(tmp_file):
+            os.unlink(tmp_file)
+
+
+def _persist_keepalive_autostart(enabled: bool, interval: int | None = None):
+    with _lock:
+        cfg = _app_state["cfg"]
+        cfg["keepalive_autostart"] = bool(enabled)
+        if interval is not None:
+            cfg["keepalive_interval"] = interval
+        _save_cfg(cfg)
 
 
 def _get_or_create_http() -> EcloudHttpUtil:
@@ -138,6 +159,71 @@ def _relogin_with_saved_credentials() -> str | None:
         _set_token(token)
         return token
     return None
+
+
+def _ensure_keepalive_autostart(reason: str = "watchdog") -> bool:
+    """Start the in-process keepalive worker if config says it should be running."""
+    if _ka.is_running():
+        return True
+
+    cfg = _app_state["cfg"]
+    if not cfg.get("keepalive_autostart"):
+        disk_cfg = _load_cfg()
+        if not disk_cfg.get("keepalive_autostart"):
+            return False
+        with _lock:
+            _app_state["cfg"] = disk_cfg
+            cfg = disk_cfg
+
+    instance_id = cfg.get("instance_id", "")
+    if not instance_id:
+        log.warning("keepalive autostart skipped: no instance_id")
+        return False
+
+    try:
+        interval = int(cfg.get("keepalive_interval", 300))
+    except (TypeError, ValueError):
+        interval = 300
+    if interval < 30:
+        interval = 30
+
+    http = _get_or_create_http()
+
+    def _relogin():
+        return _relogin_with_saved_credentials()
+
+    ok = _ka.start(http, instance_id, interval=interval, relogin_fn=_relogin)
+    if ok:
+        log.info(
+            "keepalive autostart recovered by %s: instance=%s interval=%ds",
+            reason, instance_id[:20], interval,
+        )
+    return ok
+
+
+def _keepalive_autostart_watchdog(interval: int):
+    while True:
+        try:
+            _ensure_keepalive_autostart()
+        except Exception:
+            log.exception("keepalive autostart watchdog failed")
+        time.sleep(interval)
+
+
+def _start_keepalive_autostart_watchdog(interval: int | None = None):
+    """Run one watchdog per process. It restores keepalive after process restart."""
+    global _watchdog_started
+    with _watchdog_lock:
+        if _watchdog_started:
+            return
+        _watchdog_started = True
+    seconds = interval if interval is not None else _WATCHDOG_INTERVAL
+    threading.Thread(
+        target=_keepalive_autostart_watchdog,
+        args=(seconds,),
+        daemon=True,
+        name="keepalive-autostart-watchdog",
+    ).start()
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +556,12 @@ def create_app() -> Flask:
         ok = _ka.start(http, instance_id, interval=interval, relogin_fn=_relogin)
         if not ok:
             return jsonify({"error": "保活已在运行"})
+        _persist_keepalive_autostart(True, interval=interval)
         return jsonify({"ok": True, "instance_id": instance_id, "interval": interval})
 
     @app.route("/api/keepalive/stop", methods=["POST"])
     def api_ka_stop():
+        _persist_keepalive_autostart(False)
         ok = _ka.stop()
         return jsonify({"ok": ok})
 
@@ -494,6 +582,7 @@ def create_app() -> Flask:
     # -----------------------------------------------------------------------
     @app.route("/api/logout", methods=["POST"])
     def api_logout():
+        _persist_keepalive_autostart(False)
         if _ka.is_running():
             _ka.stop()
         cfg = _app_state["cfg"]
@@ -515,5 +604,6 @@ def create_app() -> Flask:
 def run(host: str = "0.0.0.0", port: int = 8080):
     """启动 Flask 服务。"""
     app = create_app()
+    _start_keepalive_autostart_watchdog()
     log.info("Web UI 启动: http://%s:%d", host, port)
     app.run(host=host, port=port, debug=False, threaded=True)
