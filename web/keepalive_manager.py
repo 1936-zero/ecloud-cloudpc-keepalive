@@ -11,12 +11,178 @@ from collections import deque
 from datetime import datetime
 
 import config
+import keepalive as account_keepalive
 import desktop_session
 from ecloud_client import EcloudHttpUtil, EcloudError
 
 
+class AccountKeepaliveManager:
+    """管理账号登录态保活线程，对应 `python main.py keepalive`。"""
+
+    def __init__(self):
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._running = False
+        self._interval = 300
+        self._rounds = 0
+        self._last_error = ""
+        self._started_at: datetime | None = None
+        self._last_success_at: datetime | None = None
+        self._consecutive_errors = 0
+        self._log_seq = 0
+        self._logs: deque[dict] = deque(maxlen=200)
+
+    def is_running(self) -> bool:
+        return self._running
+
+    def get_status(self) -> dict:
+        with self._lock:
+            if not self._running:
+                health = "stopped"
+            elif self._last_error:
+                health = "error"
+            elif self._last_success_at:
+                health = "ok"
+            else:
+                health = "starting"
+            return {
+                "running": self._running,
+                "health": health,
+                "interval": self._interval,
+                "rounds": self._rounds,
+                "last_error": self._last_error,
+                "consecutive_errors": self._consecutive_errors,
+                "started_at": self._started_at.isoformat() if self._started_at else None,
+                "last_success_at": self._last_success_at.isoformat() if self._last_success_at else None,
+            }
+
+    def get_logs(self, since: int = 0) -> list[dict]:
+        with self._lock:
+            return [log for log in self._logs if log["seq"] > since]
+
+    def _log(self, level: str, msg: str):
+        with self._lock:
+            self._log_seq = max(self._log_seq + 1, int(time.time() * 1000))
+            entry = {
+                "seq": self._log_seq,
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "level": level,
+                "msg": msg,
+            }
+            self._logs.append(entry)
+
+    def _record_success(self):
+        with self._lock:
+            self._last_error = ""
+            self._last_success_at = datetime.now()
+            self._consecutive_errors = 0
+
+    def _record_error(self, msg: str):
+        with self._lock:
+            self._last_error = msg
+            self._consecutive_errors += 1
+
+    def start(self, http: EcloudHttpUtil, interval: int = 300, relogin_fn=None) -> bool:
+        """启动账号登录态保活线程。已在运行则返回 False。"""
+        with self._lock:
+            if self._running:
+                return False
+            self._running = True
+            self._interval = interval
+            self._rounds = 0
+            self._last_error = ""
+            self._last_success_at = None
+            self._consecutive_errors = 0
+            self._started_at = datetime.now()
+            self._stop_event.clear()
+
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(http, interval, relogin_fn),
+            daemon=True,
+            name="account-keepalive",
+        )
+        self._thread.start()
+        self._log("INFO", f"账号保活已启动: interval={interval}s")
+        return True
+
+    def stop(self) -> bool:
+        """停止账号登录态保活线程。未运行则返回 False。"""
+        if not self._running:
+            return False
+        self._stop_event.set()
+        self._log("INFO", "正在停止账号保活...")
+        if self._thread:
+            self._thread.join(timeout=10)
+        with self._lock:
+            self._running = False
+        self._log("INFO", "账号保活已停止")
+        return True
+
+    def _run(self, http: EcloudHttpUtil, interval: int, relogin_fn):
+        """保活线程主循环，复用 keepalive.keepalive_once()。"""
+        while not self._stop_event.is_set():
+            with self._lock:
+                self._rounds += 1
+                current_round = self._rounds
+            try:
+                alive = account_keepalive.keepalive_once(http)
+                if alive:
+                    self._record_success()
+                    self._log("INFO", f"[{current_round}] 账号保活成功")
+                else:
+                    self._record_error("账号保活失败，可能 token 失效")
+                    self._log("WARN", f"[{current_round}] 账号保活失败，尝试重新登录")
+                    if relogin_fn:
+                        token = relogin_fn()
+                        if token:
+                            http.set_token(token)
+                            self._log("INFO", f"[{current_round}] 已重新登录，立即重试账号保活")
+                            if account_keepalive.keepalive_once(http):
+                                self._record_success()
+                                self._log("INFO", f"[{current_round}] 账号保活成功")
+                            else:
+                                self._record_error("重登后账号保活仍失败")
+                                self._log("WARN", f"[{current_round}] 重登后账号保活仍失败")
+                        else:
+                            self._log("ERROR", f"[{current_round}] 重新登录失败，停止账号保活")
+                            break
+            except EcloudError as e:
+                self._record_error(f"[{e.code}] {e.message}")
+                self._log("WARN", f"[{current_round}] 账号保活失败: {e.message}")
+                if relogin_fn and _token_maybe_expired(e):
+                    self._log("INFO", "token 可能失效，尝试重新登录...")
+                    try:
+                        token = relogin_fn()
+                        if token:
+                            http.set_token(token)
+                            self._log("INFO", "重新登录成功，立即重试账号保活")
+                            if account_keepalive.keepalive_once(http):
+                                self._record_success()
+                                self._log("INFO", f"[{current_round}] 账号保活成功")
+                            else:
+                                self._record_error("重登后账号保活仍失败")
+                                self._log("WARN", f"[{current_round}] 重登后账号保活仍失败")
+                        else:
+                            self._log("ERROR", "重新登录失败")
+                    except Exception as ex:
+                        self._log("ERROR", f"重新登录异常: {ex}")
+            except Exception as e:
+                self._record_error(str(e))
+                self._log("ERROR", f"[{current_round}] 账号保活异常: {e}")
+
+            for _ in range(interval):
+                if self._stop_event.is_set():
+                    break
+                time.sleep(1)
+
+        with self._lock:
+            self._running = False
+
+
 class KeepaliveManager:
-    """单例：管理一个保活后台线程。"""
+    """单例：管理一个桌面会话保活后台线程。"""
 
     def __init__(self):
         self._thread: threading.Thread | None = None
@@ -178,9 +344,15 @@ class KeepaliveManager:
                             http.set_token(token)
                             self._log("INFO", "重新登录成功，立即重试保活")
                             try:
-                                uptime = session.report_uptime()
+                                alive = session.keepalive_once()
+                                if not alive:
+                                    raise EcloudError({
+                                        "errorCode": "DESKTOP_KEEPALIVE_FAILED",
+                                        "errorMessage": "桌面保活失败，可能 token 失效或桌面已关机",
+                                    })
+                                uptime = session.last_uptime or ""
                                 self._record_success(uptime)
-                                self._log("INFO", f"[{current_round}] 保活成功: {uptime}")
+                                self._log("INFO", f"[{current_round}] 桌面保活成功: {uptime or 'ok'}")
                             except EcloudError as retry_err:
                                 with self._lock:
                                     self._last_error = f"[{retry_err.code}] {retry_err.message}"

@@ -27,34 +27,35 @@ def keepalive_once(http: EcloudHttpUtil) -> bool:
     """
     执行一次保活。成功返回 True，token 失效返回 False（需重新登录）。
     """
-    ok = True
+    success = False
     # 1. 用户信息
     try:
         info = http.post(config.Endpoint.USER_GET_INFO)
         log.debug("USER_GET_INFO ok: %s", _brief(info))
+        success = True
     except EcloudError as e:
         log.warning("USER_GET_INFO failed: %s", e)
         if _is_token_expired(e):
             return False
-        ok = False
 
     # 2. 桌面列表
     try:
         devs = http.post(config.Endpoint.USER_GET_DEVICE_INFO)
         log.debug("USER_GET_DEVICE_INFO ok: %s", _brief(devs))
+        success = True
     except EcloudError as e:
         log.warning("USER_GET_DEVICE_INFO failed: %s", e)
         if _is_token_expired(e):
             return False
-        ok = False
 
     # 3. 探针上报（模拟一条登录探针事件）
     try:
         _push_probe(http)
+        success = True
     except EcloudError as e:
         log.warning("PROBE_QKK_BATCHPUSH failed: %s", e)
         # 探针失败不影响保活判定
-    return ok
+    return success
 
 
 def _push_probe(http: EcloudHttpUtil) -> None:

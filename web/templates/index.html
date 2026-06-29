@@ -45,7 +45,7 @@
 
   <!-- 控制台（登录后显示） -->
   <section id="console-section" class="card" style="display:none">
-    <h2>桌面保活</h2>
+    <h2>保活控制</h2>
 
     <div class="info-row">
       <span class="label">账号:</span>
@@ -56,43 +56,79 @@
       <span id="info-device" class="value mono"></span>
     </div>
 
-    <div class="form-row">
-      <label>保活间隔(秒)</label>
-      <input type="number" id="interval" value="300" min="30" max="3600">
+    <div class="keepalive-block">
+      <h3>账号登录态保活</h3>
+      <div class="form-row">
+        <label>账号间隔(秒)</label>
+        <input type="number" id="account-interval" value="300" min="30" max="3600">
+      </div>
+      <div class="actions">
+        <button id="btn-account-start" class="btn btn-success">启动账号保活</button>
+        <button id="btn-account-stop" class="btn btn-danger" disabled>停止账号保活</button>
+      </div>
+      <div id="account-ka-status" class="ka-status" style="display:none">
+        <div class="info-row">
+          <span class="label">状态:</span>
+          <span id="account-ka-running" class="badge badge-on">运行中</span>
+        </div>
+        <div class="info-row">
+          <span class="label">轮次:</span>
+          <span id="account-ka-rounds" class="value"></span>
+        </div>
+        <div class="info-row">
+          <span class="label">最近成功:</span>
+          <span id="account-ka-success" class="value"></span>
+        </div>
+        <div class="info-row">
+          <span class="label">最近错误:</span>
+          <span id="account-ka-error" class="value"></span>
+        </div>
+      </div>
     </div>
 
-    <!-- 桌面列表 -->
-    <div id="desktop-list" class="desktop-list">
-      <p class="hint">加载中...</p>
+    <div class="keepalive-block">
+      <h3>桌面会话保活</h3>
+      <div class="form-row">
+        <label>桌面间隔(秒)</label>
+        <input type="number" id="interval" value="300" min="30" max="3600">
+      </div>
+
+      <!-- 桌面列表 -->
+      <div id="desktop-list" class="desktop-list">
+        <p class="hint">加载中...</p>
+      </div>
+
+      <div class="actions">
+        <button id="btn-start" class="btn btn-success">启动桌面保活</button>
+        <button id="btn-stop" class="btn btn-danger" disabled>停止桌面保活</button>
+        <button id="btn-refresh" class="btn btn-small">刷新桌面</button>
+      </div>
+
+      <!-- 保活状态 -->
+      <div id="ka-status" class="ka-status" style="display:none">
+        <div class="info-row">
+          <span class="label">状态:</span>
+          <span id="ka-running" class="badge badge-on">运行中</span>
+        </div>
+        <div class="info-row">
+          <span class="label">轮次:</span>
+          <span id="ka-rounds" class="value"></span>
+        </div>
+        <div class="info-row">
+          <span class="label">运行时长:</span>
+          <span id="ka-uptime" class="value"></span>
+        </div>
+        <div class="info-row">
+          <span class="label">最近错误:</span>
+          <span id="ka-error" class="value"></span>
+        </div>
+      </div>
     </div>
 
     <div class="actions">
-      <button id="btn-start" class="btn btn-success">▶ 启动保活</button>
-      <button id="btn-stop" class="btn btn-danger" disabled>■ 停止</button>
-      <button id="btn-refresh" class="btn btn-small">刷新桌面</button>
       <button id="btn-logout" class="btn btn-small">登出</button>
     </div>
     <p id="console-error" class="error"></p>
-
-    <!-- 保活状态 -->
-    <div id="ka-status" class="ka-status" style="display:none">
-      <div class="info-row">
-        <span class="label">状态:</span>
-        <span id="ka-running" class="badge badge-on">运行中</span>
-      </div>
-      <div class="info-row">
-        <span class="label">轮次:</span>
-        <span id="ka-rounds" class="value"></span>
-      </div>
-      <div class="info-row">
-        <span class="label">运行时长:</span>
-        <span id="ka-uptime" class="value"></span>
-      </div>
-      <div class="info-row">
-        <span class="label">最近错误:</span>
-        <span id="ka-error" class="value"></span>
-      </div>
-    </div>
   </section>
 
   <!-- 日志 -->
@@ -108,6 +144,7 @@
 // ---------------------------------------------------------------------------
 var _loginType = "";
 var _lastLogSeq = 0;
+var _lastAccountLogSeq = 0;
 
 // ---------------------------------------------------------------------------
 // API helper
@@ -279,6 +316,36 @@ document.getElementById("btn-refresh").onclick = loadDesktops;
 // ---------------------------------------------------------------------------
 // 保活控制
 // ---------------------------------------------------------------------------
+document.getElementById("btn-account-start").onclick = function() {
+  var interval = parseInt(document.getElementById("account-interval").value) || 300;
+  var self = this;
+  self.disabled = true;
+  api("POST", "/api/account-keepalive/start", {interval: interval}).then(function(res){
+    if (res.error) {
+      showError(res.error);
+    } else {
+      setError("");
+      updateAccountButtons(true);
+    }
+  }).catch(function(e){
+    showError("启动账号保活失败: " + e.message);
+  }).finally(function(){
+    if (!document.getElementById("btn-account-stop").disabled) return;
+    self.disabled = false;
+  });
+};
+
+document.getElementById("btn-account-stop").onclick = function() {
+  var self = this;
+  self.disabled = true;
+  api("POST", "/api/account-keepalive/stop").then(function(res){
+    updateAccountButtons(false);
+  }).catch(function(e){
+    showError("停止账号保活失败: " + e.message);
+    self.disabled = false;
+  });
+};
+
 document.getElementById("btn-start").onclick = function() {
   var selected = document.querySelector('input[name="desktop"]:checked');
   var instanceId = selected ? selected.value : "";
@@ -336,6 +403,15 @@ function statusClass(health, running) {
   return "badge badge-on";
 }
 
+function updateAccountButtons(running, health) {
+  document.getElementById("btn-account-start").disabled = running;
+  document.getElementById("btn-account-stop").disabled = !running;
+  document.getElementById("account-ka-status").style.display = running ? "block" : "none";
+  var badge = document.getElementById("account-ka-running");
+  badge.className = statusClass(health, running);
+  badge.textContent = statusLabel(health, running);
+}
+
 function updateButtons(running, health) {
   document.getElementById("btn-start").disabled = running;
   document.getElementById("btn-stop").disabled = !running;
@@ -348,6 +424,21 @@ function updateButtons(running, health) {
 // ---------------------------------------------------------------------------
 // 轮询：保活状态 + 日志
 // ---------------------------------------------------------------------------
+setInterval(function(){
+  api("GET", "/api/account-keepalive/status").then(function(res){
+    updateAccountButtons(res.running, res.health);
+    if (res.running) {
+      document.getElementById("account-ka-rounds").textContent = res.rounds || 0;
+      document.getElementById("account-ka-success").textContent = res.last_success_at || "-";
+      var errEl = document.getElementById("account-ka-error");
+      errEl.textContent = res.last_error || "无";
+      errEl.style.color = res.last_error ? "#e74c3c" : "#27ae60";
+    }
+  }).catch(function(e){
+    console.error("account keepalive status poll failed", e);
+  });
+}, 2000);
+
 setInterval(function(){
   api("GET", "/api/keepalive/status").then(function(res){
     updateButtons(res.running, res.health);
@@ -363,22 +454,37 @@ setInterval(function(){
   });
 }, 2000);
 
+function appendLogLine(prefix, log) {
+  var box = document.getElementById("log-box");
+  var div = document.createElement("div");
+  div.className = "log-line log-" + log.level.toLowerCase();
+  div.textContent = "[" + log.time + "] " + prefix + log.msg;
+  box.appendChild(div);
+  while (box.children.length > 300) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
 setInterval(function(){
   api("GET", "/api/logs?since=" + _lastLogSeq).then(function(res){
     if (!res.logs || res.logs.length === 0) return;
-    var box = document.getElementById("log-box");
     res.logs.forEach(function(log){
       _lastLogSeq = Math.max(_lastLogSeq, log.seq);
-      var div = document.createElement("div");
-      div.className = "log-line log-" + log.level.toLowerCase();
-      div.textContent = "[" + log.time + "] " + log.msg;
-      box.appendChild(div);
+      appendLogLine("[桌面] ", log);
     });
-    // 限制 300 行
-    while (box.children.length > 300) box.removeChild(box.firstChild);
-    box.scrollTop = box.scrollHeight;
   }).catch(function(e){
     console.error("log poll failed", e);
+  });
+}, 1500);
+
+setInterval(function(){
+  api("GET", "/api/account-keepalive/logs?since=" + _lastAccountLogSeq).then(function(res){
+    if (!res.logs || res.logs.length === 0) return;
+    res.logs.forEach(function(log){
+      _lastAccountLogSeq = Math.max(_lastAccountLogSeq, log.seq);
+      appendLogLine("[账号] ", log);
+    });
+  }).catch(function(e){
+    console.error("account log poll failed", e);
   });
 }, 1500);
 

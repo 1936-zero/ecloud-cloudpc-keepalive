@@ -24,7 +24,7 @@ import login
 import desktop_list
 import desktop_session
 from ecloud_client import EcloudHttpUtil, EcloudError
-from web.keepalive_manager import KeepaliveManager
+from web.keepalive_manager import AccountKeepaliveManager, KeepaliveManager
 
 log = logging.getLogger("web")
 
@@ -46,6 +46,7 @@ _app_state = {
     "login_code": None,     # 未授信设备信任流程需要的服务端 code
 }
 _lock = threading.Lock()
+_account_ka = AccountKeepaliveManager()
 _ka = KeepaliveManager()
 _watchdog_lock = threading.Lock()
 _watchdog_started = False
@@ -109,6 +110,15 @@ def _persist_keepalive_autostart(enabled: bool, interval: int | None = None):
         cfg["keepalive_autostart"] = bool(enabled)
         if interval is not None:
             cfg["keepalive_interval"] = interval
+        _save_cfg(cfg)
+
+
+def _persist_account_keepalive_autostart(enabled: bool, interval: int | None = None):
+    with _lock:
+        cfg = _app_state["cfg"]
+        cfg["account_keepalive_autostart"] = bool(enabled)
+        if interval is not None:
+            cfg["account_keepalive_interval"] = interval
         _save_cfg(cfg)
 
 
@@ -210,9 +220,46 @@ def _ensure_keepalive_autostart(reason: str = "watchdog") -> bool:
     return ok
 
 
+def _ensure_account_keepalive_autostart(reason: str = "watchdog") -> bool:
+    """Start the account keepalive worker if config says it should be running."""
+    if _account_ka.is_running():
+        return True
+
+    cfg = _app_state["cfg"]
+    if not cfg.get("account_keepalive_autostart"):
+        disk_cfg = _load_cfg()
+        if not disk_cfg.get("account_keepalive_autostart"):
+            return False
+        with _lock:
+            _app_state["cfg"] = disk_cfg
+            cfg = disk_cfg
+
+    if not cfg.get("access_token"):
+        log.warning("account keepalive autostart skipped: no access_token")
+        return False
+
+    try:
+        interval = int(cfg.get("account_keepalive_interval", 300))
+    except (TypeError, ValueError):
+        interval = 300
+    if interval < 30:
+        interval = 30
+
+    http = _get_or_create_http()
+
+    def _relogin():
+        return _relogin_with_saved_credentials()
+
+    ok = _account_ka.start(http, interval=interval, relogin_fn=_relogin)
+    if ok:
+        log.info("account keepalive autostart recovered by %s: interval=%ds", reason, interval)
+    return ok
+
+
 def _keepalive_autostart_watchdog(interval: int):
     while True:
         try:
+            _ensure_account_keepalive_autostart()
             _ensure_keepalive_autostart()
         except Exception:
             log.exception("keepalive autostart watchdog failed")
@@ -250,6 +297,7 @@ def create_app() -> Flask:
     # 页面
     # -----------------------------------------------------------------------
     @app.route("/")
+    @app.route("/dashboard")
     def index():
         return render_template("index.html")
 
@@ -292,6 +340,7 @@ def create_app() -> Flask:
             "logged_in": logged_in,
             "username": cfg.get("username", ""),
             "device_uid": cfg.get("device_uid", ""),
+            "account_keepalive": _account_ka.get_status(),
             "keepalive": _ka.get_status(),
         }
         if error:
@@ -490,6 +539,46 @@ def create_app() -> Flask:
     # -----------------------------------------------------------------------
     # 保活控制
     # -----------------------------------------------------------------------
+    @app.route("/api/account-keepalive/start", methods=["POST"])
+    def api_account_ka_start():
+        cfg = _app_state["cfg"]
+        if not cfg.get("access_token"):
+            return jsonify({"error": "未登录"}), 401
+
+        data = request.get_json(silent=True) or {}
+        try:
+            interval = int(data.get("interval", 300))
+        except (TypeError, ValueError):
+            return jsonify({"error": "保活间隔必须是数字"}), 400
+        if interval < 30:
+            interval = 30
+
+        http = _get_or_create_http()
+
+        def _relogin():
+            return _relogin_with_saved_credentials()
+
+        ok = _account_ka.start(http, interval=interval, relogin_fn=_relogin)
+        if not ok:
+            return jsonify({"error": "账号保活已在运行"})
+        _persist_account_keepalive_autostart(True, interval=interval)
+        return jsonify({"ok": True, "interval": interval})
+
+    @app.route("/api/account-keepalive/stop", methods=["POST"])
+    def api_account_ka_stop():
+        _persist_account_keepalive_autostart(False)
+        ok = _account_ka.stop()
+        return jsonify({"ok": ok})
+
+    @app.route("/api/account-keepalive/status")
+    def api_account_ka_status():
+        return jsonify(_account_ka.get_status())
+
+    @app.route("/api/account-keepalive/logs")
+    def api_account_ka_logs():
+        since = int(request.args.get("since", 0))
+        return jsonify({"logs": _account_ka.get_logs(since)})
+
     @app.route("/api/keepalive/start", methods=["POST"])
     def api_ka_start():
         cfg = _app_state["cfg"]
@@ -618,7 +707,10 @@ def create_app() -> Flask:
     # -----------------------------------------------------------------------
     @app.route("/api/logout", methods=["POST"])
     def api_logout():
+        _persist_account_keepalive_autostart(False)
         _persist_keepalive_autostart(False)
+        if _account_ka.is_running():
+            _account_ka.stop()
         if _ka.is_running():
             _ka.stop()
         cfg = _app_state["cfg"]

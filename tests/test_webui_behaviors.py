@@ -6,14 +6,58 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import config
+import desktop_list
 import desktop_session
 import login
 from ecloud_client import EcloudError
 from web import server
-from web.keepalive_manager import KeepaliveManager
+from web.keepalive_manager import AccountKeepaliveManager, KeepaliveManager
 
 
 class WebUiStatusTests(unittest.TestCase):
+    def setUp(self):
+        server._app_state.update({
+            "http": None,
+            "cfg": {},
+            "username": "",
+            "password": "",
+            "mobile": "",
+            "login_type": "",
+            "login_code": None,
+        })
+
+    def test_login_success_uses_login_module_and_saves_token(self):
+        app = server.create_app()
+        fake_http = Mock()
+        server._app_state["cfg"] = {}
+        server._app_state["http"] = fake_http
+
+        with patch("web.server.login.login_with_password", return_value={
+            "status": login.LoginResult.SUCCESS,
+            "access_token": "fresh-token",
+        }) as login_with_password, patch("web.server._save_cfg") as save_cfg:
+            data = app.test_client().post(
+                "/api/login",
+                json={"username": "user", "password": "password"},
+            ).get_json()
+
+        self.assertEqual(data["status"], "success")
+        login_with_password.assert_called_once_with(fake_http, "user", "password")
+        fake_http.clear_token.assert_called_once()
+        fake_http.set_token.assert_called_once_with("fresh-token")
+        self.assertEqual(server._app_state["cfg"]["username"], "user")
+        self.assertEqual(server._app_state["cfg"]["password"], "password")
+        self.assertEqual(server._app_state["cfg"]["access_token"], "fresh-token")
+        self.assertEqual(save_cfg.call_count, 2)
+
+    def test_dashboard_path_serves_web_ui(self):
+        app = server.create_app()
+
+        response = app.test_client().get("/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("移动云电脑保活", response.get_data(as_text=True))
+
     def test_status_relogs_in_when_saved_token_is_invalid_and_credentials_exist(self):
         app = server.create_app()
         fake_http = Mock()
@@ -52,6 +96,51 @@ class WebUiStatusTests(unittest.TestCase):
 
         self.assertFalse(data["logged_in"])
         self.assertEqual(data["error"], "token失效")
+
+    def test_desktops_endpoint_uses_desktop_list_module(self):
+        app = server.create_app()
+        fake_http = object()
+        server._app_state["cfg"] = {"access_token": "valid-token"}
+        server._app_state["http"] = fake_http
+        desktop = desktop_list.Desktop(
+            instance_id="CCA-test",
+            machine_id="MID-test",
+            machine_name="desk",
+            origin_company_code="vendor",
+        )
+
+        with patch("web.server.desktop_list.get_desktop_list", return_value=[desktop]) as get_list, \
+             patch("web.server.desktop_list.get_desktop_status", return_value={"CCA-test": "available"}) as get_status:
+            data = app.test_client().get("/api/desktops").get_json()
+
+        get_list.assert_called_once_with(fake_http)
+        get_status.assert_called_once_with(fake_http, [desktop])
+        self.assertEqual(data["desktops"][0]["instance_id"], "CCA-test")
+        self.assertEqual(data["desktops"][0]["machine_id"], "MID-test")
+        self.assertEqual(data["desktops"][0]["status"], "available")
+
+    def test_logout_stops_keepalives_calls_logout_and_clears_token(self):
+        app = server.create_app()
+        fake_http = object()
+        server._app_state["cfg"] = {"access_token": "valid-token"}
+        server._app_state["http"] = fake_http
+
+        with patch.object(server._account_ka, "is_running", return_value=True), \
+             patch.object(server._account_ka, "stop", return_value=True) as account_stop, \
+             patch.object(server._ka, "is_running", return_value=True), \
+             patch.object(server._ka, "stop", return_value=True) as desktop_stop, \
+             patch("web.server.login.logout") as logout, \
+             patch("web.server._save_cfg") as save_cfg:
+            data = app.test_client().post("/api/logout").get_json()
+
+        self.assertTrue(data["ok"])
+        account_stop.assert_called_once()
+        desktop_stop.assert_called_once()
+        logout.assert_called_once_with(fake_http)
+        self.assertNotIn("access_token", server._app_state["cfg"])
+        self.assertFalse(server._app_state["cfg"]["account_keepalive_autostart"])
+        self.assertFalse(server._app_state["cfg"]["keepalive_autostart"])
+        self.assertEqual(save_cfg.call_count, 3)
 
 
 class KeepaliveManagerTests(unittest.TestCase):
@@ -131,6 +220,38 @@ class KeepaliveManagerTests(unittest.TestCase):
         self.assertEqual(session.keepalive_once.call_count, 2)
         self.assertEqual(manager._last_error, "")
         self.assertEqual(manager._last_uptime, "1小时2分3秒")
+
+
+class AccountKeepaliveManagerTests(unittest.TestCase):
+    def test_run_uses_account_keepalive_once(self):
+        manager = AccountKeepaliveManager()
+        manager._running = True
+        fake_http = Mock()
+
+        with patch("web.keepalive_manager.account_keepalive.keepalive_once", return_value=True) as keepalive_once, \
+             patch("web.keepalive_manager.time.sleep", side_effect=lambda _seconds: manager._stop_event.set()):
+            manager._run(fake_http, 1, relogin_fn=None)
+
+        keepalive_once.assert_called_once_with(fake_http)
+        self.assertEqual(manager._last_error, "")
+        self.assertEqual(manager._consecutive_errors, 0)
+        self.assertIsNotNone(manager._last_success_at)
+
+    def test_account_keepalive_failure_relogs_in_and_retries(self):
+        manager = AccountKeepaliveManager()
+        manager._running = True
+        fake_http = Mock()
+        relogin = Mock(return_value="fresh-token")
+
+        with patch("web.keepalive_manager.account_keepalive.keepalive_once", side_effect=[False, True]) as keepalive_once, \
+             patch("web.keepalive_manager.time.sleep", side_effect=lambda _seconds: manager._stop_event.set()):
+            manager._run(fake_http, 1, relogin)
+
+        self.assertEqual(keepalive_once.call_count, 2)
+        relogin.assert_called_once()
+        fake_http.set_token.assert_called_once_with("fresh-token")
+        self.assertEqual(manager._last_error, "")
+        self.assertEqual(manager._consecutive_errors, 0)
 
 
 class DesktopStartPreflightTests(unittest.TestCase):
@@ -257,11 +378,50 @@ class DesktopStartPreflightTests(unittest.TestCase):
         self.assertEqual(start.call_args.kwargs["machine_id"], "MID-test")
         self.assertEqual(start.call_args.kwargs["interval"], 90)
 
+    def test_account_keepalive_start_persists_autostart(self):
+        app = server.create_app()
+        server._app_state["cfg"] = {"access_token": "valid-token"}
+        server._app_state["http"] = object()
+
+        with patch.object(server._account_ka, "start", return_value=True) as start, \
+             patch("web.server._save_cfg") as save_cfg:
+            data = app.test_client().post(
+                "/api/account-keepalive/start",
+                json={"interval": 60},
+            ).get_json()
+
+        self.assertTrue(data["ok"])
+        start.assert_called_once()
+        self.assertEqual(start.call_args.kwargs["interval"], 60)
+        self.assertTrue(server._app_state["cfg"]["account_keepalive_autostart"])
+        self.assertEqual(server._app_state["cfg"]["account_keepalive_interval"], 60)
+        save_cfg.assert_called_once()
+
+    def test_account_autostart_starts_keepalive_from_config(self):
+        server._app_state["cfg"] = {
+            "access_token": "valid-token",
+            "account_keepalive_autostart": True,
+            "account_keepalive_interval": 120,
+        }
+        fake_http = object()
+        server._app_state["http"] = fake_http
+
+        with patch.object(server._account_ka, "is_running", return_value=False), \
+             patch.object(server._account_ka, "start", return_value=True) as start:
+            self.assertTrue(server._ensure_account_keepalive_autostart("test"))
+
+        start.assert_called_once()
+        args, kwargs = start.call_args
+        self.assertIs(args[0], fake_http)
+        self.assertEqual(kwargs["interval"], 120)
+
 
 class FrontendRegressionTests(unittest.TestCase):
     def test_action_buttons_restore_on_request_failure(self):
         html = Path("web/templates/index.html").read_text(encoding="utf-8")
         for button_id in (
+            "btn-account-start",
+            "btn-account-stop",
             "btn-start",
             "btn-stop",
             "btn-logout",
