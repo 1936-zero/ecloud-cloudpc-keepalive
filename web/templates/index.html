@@ -144,7 +144,6 @@
 // ---------------------------------------------------------------------------
 var _loginType = "";
 var _lastLogSeq = 0;
-var _lastAccountLogSeq = 0;
 
 // ---------------------------------------------------------------------------
 // API helper
@@ -454,37 +453,26 @@ setInterval(function(){
   });
 }, 2000);
 
-function appendLogLine(prefix, log) {
+function appendLogLine(log) {
   var box = document.getElementById("log-box");
   var div = document.createElement("div");
   div.className = "log-line log-" + log.level.toLowerCase();
-  div.textContent = "[" + log.time + "] " + prefix + log.msg;
+  var source = log.source ? "[" + log.source + "] " : "";
+  div.textContent = "[" + log.time + "] " + source + log.msg;
   box.appendChild(div);
   while (box.children.length > 300) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
 }
 
 setInterval(function(){
-  api("GET", "/api/logs?since=" + _lastLogSeq).then(function(res){
+  api("GET", "/api/all-logs?since=" + _lastLogSeq).then(function(res){
     if (!res.logs || res.logs.length === 0) return;
     res.logs.forEach(function(log){
       _lastLogSeq = Math.max(_lastLogSeq, log.seq);
-      appendLogLine("[桌面] ", log);
+      appendLogLine(log);
     });
   }).catch(function(e){
     console.error("log poll failed", e);
-  });
-}, 1500);
-
-setInterval(function(){
-  api("GET", "/api/account-keepalive/logs?since=" + _lastAccountLogSeq).then(function(res){
-    if (!res.logs || res.logs.length === 0) return;
-    res.logs.forEach(function(log){
-      _lastAccountLogSeq = Math.max(_lastAccountLogSeq, log.seq);
-      appendLogLine("[账号] ", log);
-    });
-  }).catch(function(e){
-    console.error("account log poll failed", e);
   });
 }, 1500);
 

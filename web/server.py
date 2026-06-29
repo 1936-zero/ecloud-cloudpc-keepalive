@@ -702,6 +702,21 @@ def create_app() -> Flask:
         since = int(request.args.get("since", 0))
         return jsonify({"logs": _ka.get_logs(since)})
 
+    @app.route("/api/all-logs")
+    def api_all_logs():
+        since = int(request.args.get("since", 0))
+        logs = []
+        for entry in _ka.get_logs(since):
+            item = dict(entry)
+            item["source"] = "桌面"
+            logs.append(item)
+        for entry in _account_ka.get_logs(since):
+            item = dict(entry)
+            item["source"] = "账号"
+            logs.append(item)
+        logs.sort(key=lambda item: (item["seq"], item["source"]))
+        return jsonify({"logs": logs})
+
     # -----------------------------------------------------------------------
     # 登出
     # -----------------------------------------------------------------------

@@ -58,6 +58,23 @@ class WebUiStatusTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("移动云电脑保活", response.get_data(as_text=True))
 
+    def test_all_logs_merges_sources_in_sequence_order(self):
+        app = server.create_app()
+
+        with patch.object(server._ka, "get_logs", return_value=[
+            {"seq": 30, "time": "00:00:30", "level": "INFO", "msg": "desktop"},
+        ]) as desktop_logs, patch.object(server._account_ka, "get_logs", return_value=[
+            {"seq": 20, "time": "00:00:20", "level": "INFO", "msg": "account"},
+        ]) as account_logs:
+            data = app.test_client().get("/api/all-logs?since=10").get_json()
+
+        desktop_logs.assert_called_once_with(10)
+        account_logs.assert_called_once_with(10)
+        self.assertEqual(
+            [(item["source"], item["seq"]) for item in data["logs"]],
+            [("账号", 20), ("桌面", 30)],
+        )
+
     def test_status_relogs_in_when_saved_token_is_invalid_and_credentials_exist(self):
         app = server.create_app()
         fake_http = Mock()
