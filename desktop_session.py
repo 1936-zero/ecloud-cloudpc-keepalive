@@ -41,6 +41,7 @@ class DesktopSession:
         self.machine_id = machine_id
         self.machine_name = machine_name
         self.ticket = ticket
+        self.last_uptime = ""
         # 会话标识（UUID，连接时生成，保活期间保持不变）
         self.connect_id = str(uuid.uuid4())
         self.login_uid = str(uuid.uuid4())
@@ -79,6 +80,7 @@ class DesktopSession:
                 "errorCode": "NO_UPTIME",
                 "errorMessage": "desktopUptime 未返回运行时长，桌面可能已关机",
             })
+        self.last_uptime = uptime
         log.info("桌面 %s 运行时长: %s", self.instance_id[:16], uptime)
         return uptime
 

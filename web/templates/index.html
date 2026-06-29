@@ -262,7 +262,7 @@ function loadDesktops() {
     var html = "";
     res.desktops.forEach(function(d, i){
       html += '<label class="desktop-item">' +
-        '<input type="radio" name="desktop" value="' + d.instance_id + '" ' + (i===0?"checked":"") + '>' +
+        '<input type="radio" name="desktop" value="' + d.instance_id + '" data-machine-id="' + (d.machine_id||"") + '" ' + (i===0?"checked":"") + '>' +
         '<div class="desktop-info">' +
         '<div class="desktop-name">' + (d.machine_name||"未命名") + '</div>' +
         '<div class="desktop-meta mono">' + d.instance_id.substring(0,24) + '... · ' + (d.vendor||"") + ' · ' + (d.status||"?") + '</div>' +
@@ -282,10 +282,11 @@ document.getElementById("btn-refresh").onclick = loadDesktops;
 document.getElementById("btn-start").onclick = function() {
   var selected = document.querySelector('input[name="desktop"]:checked');
   var instanceId = selected ? selected.value : "";
+  var machineId = selected ? (selected.getAttribute("data-machine-id") || "") : "";
   var interval = parseInt(document.getElementById("interval").value) || 300;
   var self = this;
   self.disabled = true;
-  api("POST", "/api/keepalive/start", {instance_id: instanceId, interval: interval}).then(function(res){
+  api("POST", "/api/keepalive/start", {instance_id: instanceId, machine_id: machineId, interval: interval}).then(function(res){
     if (res.error) {
       showError(res.error);
     } else {

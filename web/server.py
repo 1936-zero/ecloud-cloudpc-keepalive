@@ -179,6 +179,8 @@ def _ensure_keepalive_autostart(reason: str = "watchdog") -> bool:
     if not instance_id:
         log.warning("keepalive autostart skipped: no instance_id")
         return False
+    machine_id = cfg.get("machine_id", "")
+    ticket = cfg.get("ticket", "")
 
     try:
         interval = int(cfg.get("keepalive_interval", 300))
@@ -192,7 +194,14 @@ def _ensure_keepalive_autostart(reason: str = "watchdog") -> bool:
     def _relogin():
         return _relogin_with_saved_credentials()
 
-    ok = _ka.start(http, instance_id, interval=interval, relogin_fn=_relogin)
+    ok = _ka.start(
+        http,
+        instance_id,
+        machine_id=machine_id,
+        ticket=ticket,
+        interval=interval,
+        relogin_fn=_relogin,
+    )
     if ok:
         log.info(
             "keepalive autostart recovered by %s: instance=%s interval=%ds",
@@ -489,6 +498,8 @@ def create_app() -> Flask:
 
         data = request.get_json(silent=True) or {}
         instance_id = data.get("instance_id", "")
+        machine_id = data.get("machine_id", "")
+        ticket = data.get("ticket", "") or cfg.get("ticket", "")
         try:
             interval = int(data.get("interval", 300))
         except (TypeError, ValueError):
@@ -541,19 +552,44 @@ def create_app() -> Flask:
                     detail = preflight_errors[0] if preflight_errors else "desktopUptime 未返回运行时长"
                     return jsonify({"error": f"没有可保活桌面：{detail}"})
                 instance_id = selected.instance_id
+                machine_id = selected.machine_id
                 cfg["instance_id"] = instance_id
                 cfg["machine_id"] = selected.machine_id
                 _save_cfg(cfg)
             except EcloudError as e:
                 return jsonify({"error": f"拉取桌面列表失败: {e.message}"})
         else:
+            if not machine_id and cfg.get("instance_id") == instance_id:
+                machine_id = cfg.get("machine_id", "")
+            if not machine_id:
+                try:
+                    desktops = _call_with_relogin(lambda: desktop_list.get_desktop_list(http))
+                    for d in desktops:
+                        if d.instance_id == instance_id:
+                            machine_id = d.machine_id
+                            break
+                except EcloudError as e:
+                    log.info("desktop machine_id lookup failed during start: %s", e.message)
             try:
                 uptime = _call_with_relogin(lambda: _preflight_uptime(http, instance_id))
                 log.info("desktop preflight ok: instance=%s uptime=%s", instance_id[:20], uptime)
             except EcloudError as e:
                 return jsonify({"error": f"桌面不可保活: {e.message}"})
+            cfg["instance_id"] = instance_id
+            if machine_id:
+                cfg["machine_id"] = machine_id
+            if ticket:
+                cfg["ticket"] = ticket
+            _save_cfg(cfg)
 
-        ok = _ka.start(http, instance_id, interval=interval, relogin_fn=_relogin)
+        ok = _ka.start(
+            http,
+            instance_id,
+            machine_id=machine_id,
+            ticket=ticket,
+            interval=interval,
+            relogin_fn=_relogin,
+        )
         if not ok:
             return jsonify({"error": "保活已在运行"})
         _persist_keepalive_autostart(True, interval=interval)

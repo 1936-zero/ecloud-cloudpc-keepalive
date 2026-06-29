@@ -86,6 +86,7 @@ class KeepaliveManager:
             self._consecutive_errors = 0
 
     def start(self, http: EcloudHttpUtil, instance_id: str,
+              machine_id: str = "", ticket: str = "",
               interval: int = 300, relogin_fn=None) -> bool:
         """启动保活线程。已在运行则返回 False。"""
         with self._lock:
@@ -103,7 +104,8 @@ class KeepaliveManager:
             self._stop_event.clear()
 
         self._thread = threading.Thread(
-            target=self._run, args=(http, instance_id, interval, relogin_fn),
+            target=self._run,
+            args=(http, instance_id, machine_id, ticket, interval, relogin_fn),
             daemon=True, name="keepalive",
         )
         self._thread.start()
@@ -124,17 +126,44 @@ class KeepaliveManager:
         return True
 
     def _run(self, http: EcloudHttpUtil, instance_id: str,
-             interval: int, relogin_fn):
-        """保活线程主循环。"""
-        session = desktop_session.DesktopSession(http, instance_id)
+             machine_id: str, ticket: str, interval: int, relogin_fn):
+        """保活线程主循环，复用 desktop-keepalive 的桌面保活语义。"""
+        session = desktop_session.DesktopSession(http, instance_id, machine_id, ticket=ticket)
+        if ticket:
+            try:
+                session.register_session()
+            except EcloudError as e:
+                self._log("WARN", f"初次 session 登记失败（忽略）: {e.message}")
+
         while not self._stop_event.is_set():
             with self._lock:
                 self._rounds += 1
                 current_round = self._rounds
             try:
-                uptime = session.report_uptime()
-                self._record_success(uptime)
-                self._log("INFO", f"[{current_round}] 保活成功: {uptime}")
+                alive = session.keepalive_once()
+                if alive:
+                    uptime = session.last_uptime or ""
+                    self._record_success(uptime)
+                    self._log("INFO", f"[{current_round}] 桌面保活成功: {uptime or 'ok'}")
+                else:
+                    with self._lock:
+                        self._last_error = "桌面保活失败，可能 token 失效或桌面已关机"
+                        self._consecutive_errors += 1
+                    self._log("WARN", f"[{current_round}] 桌面保活失败，可能 token 失效或桌面已关机")
+                    if relogin_fn:
+                        token = relogin_fn()
+                        if token:
+                            http.set_token(token)
+                            self._log("INFO", f"[{current_round}] 已重新登录，立即重试桌面保活")
+                            if session.keepalive_once():
+                                uptime = session.last_uptime or ""
+                                self._record_success(uptime)
+                                self._log("INFO", f"[{current_round}] 桌面保活成功: {uptime or 'ok'}")
+                            else:
+                                self._log("WARN", f"[{current_round}] 重登后桌面保活仍失败")
+                        else:
+                            self._log("ERROR", f"[{current_round}] 重新登录失败，停止保活")
+                            break
             except EcloudError as e:
                 with self._lock:
                     self._last_error = f"[{e.code}] {e.message}"

@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import config
+import desktop_session
 import login
 from ecloud_client import EcloudError
 from web import server
@@ -81,24 +82,66 @@ class KeepaliveManagerTests(unittest.TestCase):
         fake_http = Mock()
         relogin = Mock(return_value="fresh-token")
         session = Mock()
-        session.report_uptime.side_effect = [
-            EcloudError({"errorCode": "401", "errorMessage": "token失效"}),
-            "1小时2分3秒",
-        ]
+        session.keepalive_once.side_effect = [False, True]
+        session.last_uptime = "1小时2分3秒"
 
         with patch("web.keepalive_manager.desktop_session.DesktopSession", return_value=session), \
              patch("web.keepalive_manager.time.sleep", side_effect=lambda _seconds: manager._stop_event.set()):
-            manager._run(fake_http, "CCA-test", 1, relogin)
+            manager._run(fake_http, "CCA-test", "", "", 1, relogin)
 
-        self.assertEqual(session.report_uptime.call_count, 2)
+        self.assertEqual(session.keepalive_once.call_count, 2)
         relogin.assert_called_once()
         fake_http.set_token.assert_called_once_with("fresh-token")
         self.assertEqual(manager._last_error, "")
         self.assertEqual(manager._consecutive_errors, 0)
         self.assertEqual(manager._last_uptime, "1小时2分3秒")
 
+    def test_run_uses_desktop_keepalive_once(self):
+        manager = KeepaliveManager()
+        manager._running = True
+        fake_http = Mock()
+        session = Mock()
+        session.keepalive_once.return_value = True
+        session.last_uptime = "1小时2分3秒"
+
+        with patch("web.keepalive_manager.desktop_session.DesktopSession", return_value=session) as session_cls, \
+             patch("web.keepalive_manager.time.sleep", side_effect=lambda _seconds: manager._stop_event.set()):
+            manager._run(fake_http, "CCA-test", "MID-test", "ticket-test", 1, relogin_fn=None)
+
+        session_cls.assert_called_once_with(fake_http, "CCA-test", "MID-test", ticket="ticket-test")
+        session.register_session.assert_called_once()
+        session.keepalive_once.assert_called_once()
+        self.assertEqual(manager._last_uptime, "1小时2分3秒")
+
+    def test_desktop_keepalive_failure_relogs_in_and_retries(self):
+        manager = KeepaliveManager()
+        manager._running = True
+        fake_http = Mock()
+        relogin = Mock(return_value="fresh-token")
+        session = Mock()
+        session.keepalive_once.side_effect = [False, True]
+        session.last_uptime = "1小时2分3秒"
+
+        with patch("web.keepalive_manager.desktop_session.DesktopSession", return_value=session), \
+             patch("web.keepalive_manager.time.sleep", side_effect=lambda _seconds: manager._stop_event.set()):
+            manager._run(fake_http, "CCA-test", "", "", 1, relogin)
+
+        relogin.assert_called_once()
+        fake_http.set_token.assert_called_once_with("fresh-token")
+        self.assertEqual(session.keepalive_once.call_count, 2)
+        self.assertEqual(manager._last_error, "")
+        self.assertEqual(manager._last_uptime, "1小时2分3秒")
+
 
 class DesktopStartPreflightTests(unittest.TestCase):
+    def test_desktop_keepalive_once_records_last_uptime(self):
+        fake_http = Mock()
+        fake_http.post.return_value = "0小时1分2秒"
+        session = desktop_session.DesktopSession(fake_http, "CCA-test")
+
+        self.assertTrue(session.keepalive_once())
+        self.assertEqual(session.last_uptime, "0小时1分2秒")
+
     def test_save_cfg_writes_valid_json_without_temp_file_leftovers(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_path = Path(tmpdir) / "cloud_pc.json"
@@ -136,14 +179,17 @@ class DesktopStartPreflightTests(unittest.TestCase):
              patch("web.server._save_cfg") as save_cfg:
             data = app.test_client().post(
                 "/api/keepalive/start",
-                json={"instance_id": "CCA-test", "interval": 60},
+                json={"instance_id": "CCA-test", "machine_id": "MID-test", "interval": 60},
             ).get_json()
 
         self.assertTrue(data["ok"])
         start.assert_called_once()
+        self.assertEqual(start.call_args.kwargs["machine_id"], "MID-test")
+        self.assertEqual(server._app_state["cfg"]["instance_id"], "CCA-test")
+        self.assertEqual(server._app_state["cfg"]["machine_id"], "MID-test")
         self.assertTrue(server._app_state["cfg"]["keepalive_autostart"])
         self.assertEqual(server._app_state["cfg"]["keepalive_interval"], 60)
-        save_cfg.assert_called_once()
+        self.assertEqual(save_cfg.call_count, 2)
 
     def test_stop_disables_persisted_autostart(self):
         app = server.create_app()
@@ -171,6 +217,8 @@ class DesktopStartPreflightTests(unittest.TestCase):
         server._app_state["cfg"] = {
             "access_token": "valid-token",
             "instance_id": "CCA-test",
+            "machine_id": "MID-test",
+            "ticket": "ticket-test",
             "keepalive_autostart": True,
             "keepalive_interval": 60,
         }
@@ -185,6 +233,8 @@ class DesktopStartPreflightTests(unittest.TestCase):
         args, kwargs = start.call_args
         self.assertIs(args[0], fake_http)
         self.assertEqual(args[1], "CCA-test")
+        self.assertEqual(kwargs["machine_id"], "MID-test")
+        self.assertEqual(kwargs["ticket"], "ticket-test")
         self.assertEqual(kwargs["interval"], 60)
 
     def test_autostart_reloads_config_when_memory_state_is_stale(self):
@@ -195,6 +245,7 @@ class DesktopStartPreflightTests(unittest.TestCase):
         with patch("web.server._load_cfg", return_value={
             "access_token": "valid-token",
             "instance_id": "CCA-test",
+            "machine_id": "MID-test",
             "keepalive_autostart": True,
             "keepalive_interval": 90,
         }), patch.object(server._ka, "is_running", return_value=False), \
@@ -203,6 +254,7 @@ class DesktopStartPreflightTests(unittest.TestCase):
 
         start.assert_called_once()
         self.assertTrue(server._app_state["cfg"]["keepalive_autostart"])
+        self.assertEqual(start.call_args.kwargs["machine_id"], "MID-test")
         self.assertEqual(start.call_args.kwargs["interval"], 90)
 
 
