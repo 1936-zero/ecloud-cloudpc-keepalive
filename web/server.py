@@ -705,16 +705,18 @@ def create_app() -> Flask:
     @app.route("/api/all-logs")
     def api_all_logs():
         since = int(request.args.get("since", 0))
+        desktop_since = int(request.args.get("desktop_since", since))
+        account_since = int(request.args.get("account_since", since))
         logs = []
-        for entry in _ka.get_logs(since):
+        for entry in _ka.get_logs(desktop_since):
             item = dict(entry)
             item["source"] = "桌面"
             logs.append(item)
-        for entry in _account_ka.get_logs(since):
+        for entry in _account_ka.get_logs(account_since):
             item = dict(entry)
             item["source"] = "账号"
             logs.append(item)
-        logs.sort(key=lambda item: (item["seq"], item["source"]))
+        logs.sort(key=lambda item: (item.get("created_at", ""), item["seq"], item["source"]))
         return jsonify({"logs": logs})
 
     # -----------------------------------------------------------------------

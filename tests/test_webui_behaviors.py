@@ -62,9 +62,9 @@ class WebUiStatusTests(unittest.TestCase):
         app = server.create_app()
 
         with patch.object(server._ka, "get_logs", return_value=[
-            {"seq": 30, "time": "00:00:30", "level": "INFO", "msg": "desktop"},
+            {"seq": 30, "time": "00:00:30", "created_at": "2026-07-01T00:00:30.000", "level": "INFO", "msg": "desktop"},
         ]) as desktop_logs, patch.object(server._account_ka, "get_logs", return_value=[
-            {"seq": 20, "time": "00:00:20", "level": "INFO", "msg": "account"},
+            {"seq": 20, "time": "00:00:20", "created_at": "2026-07-01T00:00:20.000", "level": "INFO", "msg": "account"},
         ]) as account_logs:
             data = app.test_client().get("/api/all-logs?since=10").get_json()
 
@@ -74,6 +74,16 @@ class WebUiStatusTests(unittest.TestCase):
             [(item["source"], item["seq"]) for item in data["logs"]],
             [("账号", 20), ("桌面", 30)],
         )
+
+    def test_all_logs_uses_independent_source_cursors(self):
+        app = server.create_app()
+
+        with patch.object(server._ka, "get_logs", return_value=[]) as desktop_logs, \
+             patch.object(server._account_ka, "get_logs", return_value=[]) as account_logs:
+            app.test_client().get("/api/all-logs?desktop_since=100&account_since=20")
+
+        desktop_logs.assert_called_once_with(100)
+        account_logs.assert_called_once_with(20)
 
     def test_status_relogs_in_when_saved_token_is_invalid_and_credentials_exist(self):
         app = server.create_app()
@@ -238,6 +248,25 @@ class KeepaliveManagerTests(unittest.TestCase):
         self.assertEqual(manager._last_error, "")
         self.assertEqual(manager._last_uptime, "1小时2分3秒")
 
+    def test_desktop_keepalive_non_token_failure_does_not_relogin(self):
+        manager = KeepaliveManager()
+        manager._running = True
+        fake_http = Mock()
+        relogin = Mock(return_value="fresh-token")
+        session = Mock()
+        session.keepalive_once.return_value = False
+        session.last_error = "[NO_UPTIME] desktopUptime 未返回运行时长"
+        session.last_error_token_expired = False
+
+        with patch("web.keepalive_manager.desktop_session.DesktopSession", return_value=session), \
+             patch("web.keepalive_manager.time.sleep", side_effect=lambda _seconds: manager._stop_event.set()):
+            manager._run(fake_http, "CCA-test", "", "", 1, relogin)
+
+        relogin.assert_not_called()
+        fake_http.set_token.assert_not_called()
+        session.keepalive_once.assert_called_once()
+        self.assertEqual(manager._last_error, "[NO_UPTIME] desktopUptime 未返回运行时长")
+
 
 class AccountKeepaliveManagerTests(unittest.TestCase):
     def test_run_uses_account_keepalive_once(self):
@@ -279,6 +308,18 @@ class DesktopStartPreflightTests(unittest.TestCase):
 
         self.assertTrue(session.keepalive_once())
         self.assertEqual(session.last_uptime, "0小时1分2秒")
+
+    def test_desktop_keepalive_once_records_error_detail(self):
+        fake_http = Mock()
+        fake_http.post.side_effect = EcloudError({
+            "errorCode": "NO_UPTIME",
+            "errorMessage": "desktopUptime 未返回运行时长",
+        })
+        session = desktop_session.DesktopSession(fake_http, "CCA-test")
+
+        self.assertFalse(session.keepalive_once())
+        self.assertEqual(session.last_error, "[NO_UPTIME] desktopUptime 未返回运行时长")
+        self.assertFalse(session.last_error_token_expired)
 
     def test_save_cfg_writes_valid_json_without_temp_file_leftovers(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -453,6 +494,14 @@ class FrontendRegressionTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(handler)
                 self.assertIn(".catch(", handler.group("body"))
+
+    def test_log_polling_uses_independent_source_cursors(self):
+        html = Path("web/templates/index.html").read_text(encoding="utf-8")
+
+        self.assertIn("_lastDesktopLogSeq", html)
+        self.assertIn("_lastAccountLogSeq", html)
+        self.assertIn("desktop_since=", html)
+        self.assertIn("account_since=", html)
 
 
 if __name__ == "__main__":

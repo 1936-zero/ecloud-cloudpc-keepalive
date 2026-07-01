@@ -42,6 +42,9 @@ class DesktopSession:
         self.machine_name = machine_name
         self.ticket = ticket
         self.last_uptime = ""
+        self.last_error = ""
+        self.last_error_code = ""
+        self.last_error_token_expired = False
         # 会话标识（UUID，连接时生成，保活期间保持不变）
         self.connect_id = str(uuid.uuid4())
         self.login_uid = str(uuid.uuid4())
@@ -81,6 +84,9 @@ class DesktopSession:
                 "errorMessage": "desktopUptime 未返回运行时长，桌面可能已关机",
             })
         self.last_uptime = uptime
+        self.last_error = ""
+        self.last_error_code = ""
+        self.last_error_token_expired = False
         log.info("桌面 %s 运行时长: %s", self.instance_id[:16], uptime)
         return uptime
 
@@ -121,8 +127,11 @@ class DesktopSession:
             self.report_uptime()
             return True
         except EcloudError as e:
+            self.last_error = f"[{e.code}] {e.message}"
+            self.last_error_code = e.code
+            self.last_error_token_expired = _is_token_expired(e)
             log.warning("desktopUptime 失败: %s", e)
-            if _is_token_expired(e):
+            if self.last_error_token_expired:
                 return False
             # uptime 失败可能是桌面关机或 instanceId 无效
             return False
@@ -167,8 +176,9 @@ def run_desktop_keepalive(http: EcloudHttpUtil, instance_id: str,
             if alive:
                 log.info("[%d] 桌面保活成功", rounds)
             else:
-                log.warning("[%d] 桌面保活失败，可能 token 失效或桌面已关机", rounds)
-                if relogin_fn:
+                detail = session.last_error or "桌面保活失败"
+                log.warning("[%d] 桌面保活失败: %s", rounds, detail)
+                if relogin_fn and session.last_error_token_expired:
                     token = relogin_fn()
                     if token:
                         http.set_token(token)

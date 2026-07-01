@@ -143,7 +143,8 @@
 // 状态
 // ---------------------------------------------------------------------------
 var _loginType = "";
-var _lastLogSeq = 0;
+var _lastDesktopLogSeq = 0;
+var _lastAccountLogSeq = 0;
 
 // ---------------------------------------------------------------------------
 // API helper
@@ -465,10 +466,14 @@ function appendLogLine(log) {
 }
 
 setInterval(function(){
-  api("GET", "/api/all-logs?since=" + _lastLogSeq).then(function(res){
+  api("GET", "/api/all-logs?desktop_since=" + _lastDesktopLogSeq + "&account_since=" + _lastAccountLogSeq).then(function(res){
     if (!res.logs || res.logs.length === 0) return;
     res.logs.forEach(function(log){
-      _lastLogSeq = Math.max(_lastLogSeq, log.seq);
+      if (log.source === "桌面") {
+        _lastDesktopLogSeq = Math.max(_lastDesktopLogSeq, log.seq);
+      } else if (log.source === "账号") {
+        _lastAccountLogSeq = Math.max(_lastAccountLogSeq, log.seq);
+      }
       appendLogLine(log);
     });
   }).catch(function(e){

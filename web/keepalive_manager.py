@@ -16,6 +16,18 @@ import desktop_session
 from ecloud_client import EcloudHttpUtil, EcloudError
 
 
+def _make_log_entry(previous_seq: int, level: str, msg: str) -> tuple[int, dict]:
+    now = datetime.now()
+    seq = max(previous_seq + 1, int(time.time() * 1000))
+    return seq, {
+        "seq": seq,
+        "time": now.strftime("%H:%M:%S"),
+        "created_at": now.isoformat(timespec="milliseconds"),
+        "level": level,
+        "msg": msg,
+    }
+
+
 class AccountKeepaliveManager:
     """管理账号登录态保活线程，对应 `python main.py keepalive`。"""
 
@@ -63,13 +75,7 @@ class AccountKeepaliveManager:
 
     def _log(self, level: str, msg: str):
         with self._lock:
-            self._log_seq = max(self._log_seq + 1, int(time.time() * 1000))
-            entry = {
-                "seq": self._log_seq,
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "level": level,
-                "msg": msg,
-            }
+            self._log_seq, entry = _make_log_entry(self._log_seq, level, msg)
             self._logs.append(entry)
 
     def _record_success(self):
@@ -235,13 +241,7 @@ class KeepaliveManager:
 
     def _log(self, level: str, msg: str):
         with self._lock:
-            self._log_seq = max(self._log_seq + 1, int(time.time() * 1000))
-            entry = {
-                "seq": self._log_seq,
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "level": level,
-                "msg": msg,
-            }
+            self._log_seq, entry = _make_log_entry(self._log_seq, level, msg)
             self._logs.append(entry)
 
     def _record_success(self, uptime: str):
@@ -312,11 +312,13 @@ class KeepaliveManager:
                     self._record_success(uptime)
                     self._log("INFO", f"[{current_round}] 桌面保活成功: {uptime or 'ok'}")
                 else:
+                    detail = _desktop_failure_detail(session)
                     with self._lock:
-                        self._last_error = "桌面保活失败，可能 token 失效或桌面已关机"
+                        self._last_error = detail
                         self._consecutive_errors += 1
-                    self._log("WARN", f"[{current_round}] 桌面保活失败，可能 token 失效或桌面已关机")
-                    if relogin_fn:
+                    self._log("WARN", f"[{current_round}] 桌面保活失败: {detail}")
+                    should_relogin = getattr(session, "last_error_token_expired", True)
+                    if relogin_fn and should_relogin:
                         token = relogin_fn()
                         if token:
                             http.set_token(token)
@@ -326,7 +328,10 @@ class KeepaliveManager:
                                 self._record_success(uptime)
                                 self._log("INFO", f"[{current_round}] 桌面保活成功: {uptime or 'ok'}")
                             else:
-                                self._log("WARN", f"[{current_round}] 重登后桌面保活仍失败")
+                                detail = _desktop_failure_detail(session)
+                                with self._lock:
+                                    self._last_error = detail
+                                self._log("WARN", f"[{current_round}] 重登后桌面保活仍失败: {detail}")
                         else:
                             self._log("ERROR", f"[{current_round}] 重新登录失败，停止保活")
                             break
@@ -384,3 +389,7 @@ class KeepaliveManager:
 def _token_maybe_expired(err: EcloudError) -> bool:
     msg = (err.message or "").lower()
     return any(h in msg for h in ["token", "失效", "未登录", "expire", "401", "授权"])
+
+
+def _desktop_failure_detail(session) -> str:
+    return getattr(session, "last_error", "") or "桌面保活失败，可能 token 失效或桌面已关机"
